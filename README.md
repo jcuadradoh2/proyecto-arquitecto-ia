@@ -62,18 +62,52 @@ incluye las opciones evaluadas y al menos dos justificaciones teóricas.
 
 | Nivel | Diagrama | Archivo |
 |---|---|---|
-| Contexto (N1) | Sistema de Banca por Internet BP y su entorno | `docs/diagramas/01_contexto.png` |
-| Contenedores (N2) | Vista general | `docs/diagramas/02_contenedores.png` |
-| Contenedores (N2) | Detalle A: flujo síncrono | `docs/diagramas/03_contenedores_sincrono.png` |
-| Contenedores (N2) | Detalle B: flujo asíncrono | `docs/diagramas/04_contenedores_asincrono.png` |
-| Componentes (N3) | Transferencias y Pagos + capa de integración | `docs/diagramas/05_componentes_transferencias.png` |
-| Componentes (N3) | Autenticación y autorización | `docs/diagramas/06_componentes_autenticacion.png` |
-| Componentes (N3) | Onboarding facial | `docs/diagramas/06b_componentes_onboarding.png` |
-| Componentes (N3) | Auditoría | `docs/diagramas/07_componentes_auditoria.png` |
-| Componentes (N3) | Clientes frecuentes | `docs/diagramas/08_componentes_clientes_frecuentes.png` |
-| Secuencia | Login móvil / Login SPA vía BFF / Onboarding / Transferencia | `docs/diagramas/09…12_*.png` |
-| Despliegue | Infraestructura AWS (Multi-AZ + DR) | `docs/diagramas/13_despliegue_aws.png` |
-| Operación | Monitoreo, observabilidad y auto-healing | `docs/diagramas/14_observabilidad.png` |
+| Contexto (N1) | Sistema de Banca por Internet BP y su entorno | [PNG](docs/diagramas/01_contexto.png) · [SVG](docs/diagramas/01_contexto.svg) |
+| Contenedores (N2) | Vista general | [PNG](docs/diagramas/02_contenedores.png) · [SVG](docs/diagramas/02_contenedores.svg) |
+| Contenedores (N2) | Detalle A: flujo síncrono | [PNG](docs/diagramas/03_contenedores_sincrono.png) · [SVG](docs/diagramas/03_contenedores_sincrono.svg) |
+| Contenedores (N2) | Detalle B: flujo asíncrono | [PNG](docs/diagramas/04_contenedores_asincrono.png) · [SVG](docs/diagramas/04_contenedores_asincrono.svg) |
+| Componentes (N3) | Transferencias y Pagos + capa de integración | [PNG](docs/diagramas/05_componentes_transferencias.png) · [SVG](docs/diagramas/05_componentes_transferencias.svg) |
+| Componentes (N3) | Autenticación y autorización | [PNG](docs/diagramas/06_componentes_autenticacion.png) · [SVG](docs/diagramas/06_componentes_autenticacion.svg) |
+| Componentes (N3) | Onboarding facial | [PNG](docs/diagramas/06b_componentes_onboarding.png) · [SVG](docs/diagramas/06b_componentes_onboarding.svg) |
+| Componentes (N3) | Auditoría | [PNG](docs/diagramas/07_componentes_auditoria.png) · [SVG](docs/diagramas/07_componentes_auditoria.svg) |
+| Componentes (N3) | Clientes frecuentes | [PNG](docs/diagramas/08_componentes_clientes_frecuentes.png) · [SVG](docs/diagramas/08_componentes_clientes_frecuentes.svg) |
+| Secuencia | Login móvil / Login SPA vía BFF / Onboarding / Transferencia | [09](docs/diagramas/09_secuencia_login_movil.png) · [10](docs/diagramas/10_secuencia_login_spa.png) · [11](docs/diagramas/11_secuencia_onboarding.png) · [12](docs/diagramas/12_secuencia_transferencia.png) |
+| Despliegue | Infraestructura AWS (Multi-AZ + DR) | [PNG](docs/diagramas/13_despliegue_aws.png) · [SVG](docs/diagramas/13_despliegue_aws.svg) |
+| Operación | Monitoreo, observabilidad y auto-healing | [PNG](docs/diagramas/14_observabilidad.png) · [SVG](docs/diagramas/14_observabilidad.svg) |
+
+### Contexto (C4 – Nivel 1)
+![Contexto](docs/diagramas/01_contexto.png)
+
+### Contenedores (C4 – Nivel 2)
+![Contenedores](docs/diagramas/02_contenedores.png)
+
+### Despliegue en AWS
+![Despliegue AWS](docs/diagramas/13_despliegue_aws.png)
+
+## 🧾 Decisiones de arquitectura (ADR)
+
+- [D-01](docs/adr/D-01-microservicios-en-contenedores-con-orientacion-a-eventos.md) Microservicios en contenedores con orientacion a eventos
+- [D-02](docs/adr/D-02-dos-sistemas-de-notificacion-sns-ses-twilio-whatsapp.md) Dos sistemas de notificacion sns ses twilio whatsapp
+- [D-03](docs/adr/D-03-rest-en-el-borde-grpc-interno-eventos-por-kafka.md) Rest en el borde grpc interno eventos por kafka
+- [D-04](docs/adr/D-04-amazon-api-gateway-con-jwt-authorizer-para-canales.md) Amazon api gateway con jwt authorizer para canales
+- [D-05](docs/adr/D-05-patron-bff-por-canal.md) Patron bff por canal
+- [D-06](docs/adr/D-06-saga-orquestada-outbox-idempotent-receiver.md) Saga orquestada outbox idempotent receiver
+- [D-07](docs/adr/D-07-angular-para-la-spa.md) Angular para la spa
+- [D-08](docs/adr/D-08-flutter-para-la-app-movil.md) Flutter para la app movil
+- [D-09](docs/adr/D-09-authorization-code-pkce-fapi-2-0-par-dpop-spa-via-bff-movil-.md) Authorization code pkce fapi 2 0 par dpop spa via bff movil 
+- [D-10](docs/adr/D-10-auditoria-por-eventos-cuenta-separada-cadena-de-hashes-firma.md) Auditoria por eventos cuenta separada cadena de hashes firma
+- [D-11](docs/adr/D-11-vista-materializada-por-eventos-para-clientes-frecuentes-dyn.md) Vista materializada por eventos para clientes frecuentes dyn
+- [D-12](docs/adr/D-12-rekognition-face-liveness-comparefaces-textract-tras-adaptad.md) Rekognition face liveness comparefaces textract tras adaptad
+- [D-13](docs/adr/D-13-kong-conectores-acl-para-integracion.md) Kong conectores acl para integracion
+- [D-14](docs/adr/D-14-aurora-postgresql-dynamodb-elasticache-redis.md) Aurora postgresql dynamodb elasticache redis
+- [D-15](docs/adr/D-15-amazon-msk-kafka-debezium-con-sqs-sns-complementarios.md) Amazon msk kafka debezium con sqs sns complementarios
+- [D-16](docs/adr/D-16-aws-como-nube-publica.md) Aws como nube publica
+- [D-17](docs/adr/D-17-eks-graviton-karpenter-istio.md) Eks graviton karpenter istio
+- [D-18](docs/adr/D-18-dr-multi-region-warm-standby-rto-30-min-rpo-1-min.md) Dr multi region warm standby rto 30 min rpo 1 min
+- [D-19](docs/adr/D-19-opentelemetry-managed-prometheus-grafana-cloudwatch-x-ray.md) Opentelemetry managed prometheus grafana cloudwatch x ray
+- [D-20](docs/adr/D-20-servicios-gestionados-compromisos-de-largo-plazo.md) Servicios gestionados compromisos de largo plazo
+
+Índice completo con la sección del documento en [docs/adr/README.md](docs/adr/README.md).
 
 ## 🔧 Regenerar los diagramas
 
