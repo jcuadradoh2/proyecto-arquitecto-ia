@@ -1,0 +1,85 @@
+@startuml 11_secuencia_onboarding
+!include _seq_style.iuml
+scale 1.4
+title Secuencia: Onboarding digital con reconocimiento facial e integración con el flujo de autenticación
+autonumber "<b>[00]"
+
+actor "Cliente nuevo" as cli
+participant "App Móvil\n(Módulo Onboarding + SDK Liveness)" as app
+box "AWS – Banca por Internet BP" #f4fbf5
+  participant "API Gateway\nde Canales" as gw
+  participant "Servicio de\nOnboarding" as onb
+  participant "Amazon\nTextract" as tx
+  participant "Amazon Rekognition\n(Face Liveness · CompareFaces)" as rek
+  participant "API Gateway de\nIntegración (Kong)" as kong
+  participant "S3 Evidencias\n(Object Lock) + MSK" as s3
+end box
+participant "Registro Civil /\nListas AML-PEP" as ext
+box "Data Center BP" #fbf4f4
+  participant "Core Bancario\n+ CRM" as core
+  participant "IdP Corporativo\n(SCIM 2.0 / WebAuthn)" as idp
+end box
+
+== 1. Inicio y consentimiento (LOPDP) ==
+cli -> app : "Abrir cuenta"
+app -> app : Atestación del dispositivo (Play Integrity / App Attest)
+cli -> app : Acepta consentimiento informado (datos biométricos)
+app -> gw : POST /onboarding/sessions {consentimiento, atestación}
+gw -> onb : Enruta (rate limit por dispositivo / IP)
+onb -> onb : Crea sesión (estado INICIADA); registra consentimiento con hash + sello de tiempo
+onb --> app : session_token (JWT de 30 min, ámbito onboarding)
+
+== 2. Documento de identidad ==
+cli -> app : Captura anverso / reverso de la cédula
+app -> gw : POST /onboarding/{id}/document (imágenes cifradas en tránsito)
+gw -> onb : Enruta
+onb -> tx : AnalyzeID
+tx --> onb : Nombres, número de cédula, vigencia, MRZ, foto
+onb -> ext : Consulta cédula en Registro Civil (mTLS)
+ext --> onb : Datos oficiales + foto de referencia
+alt Datos no coinciden / documento vencido
+  onb --> app : Rechazo con motivo (máx. 3 intentos)
+end
+
+== 3. Prueba de vida y comparación facial ==
+onb -> rek : CreateFaceLivenessSession
+rek --> onb : livenessSessionId
+onb --> app : livenessSessionId
+app -> rek : SDK Face Liveness: reto activo (movimiento / luz) – flujo de video cifrado
+rek --> app : Reto completado
+app -> gw : POST /onboarding/{id}/liveness/complete
+gw -> onb : Enruta
+onb -> rek : GetFaceLivenessSessionResults
+rek --> onb : confidence (≥ 90 %) + imagen de referencia
+onb -> rek : CompareFaces (selfie ↔ foto documento / Registro Civil)
+rek --> onb : similarity (≥ 90 %)
+alt Vida o similitud bajo umbral
+  onb --> app : Reintento (máx. 3) → luego EN_REVISION manual
+end
+
+== 4. Cumplimiento y alta del cliente ==
+onb -> ext : Screening listas AML / PEP (OFAC, ONU, UAFE)
+ext --> onb : Sin coincidencias | coincidencia
+alt Coincidencia en listas
+  onb -> s3 : Evento OnboardingUnderReview → Oficial de Cumplimiento (SLA 24 h)
+  onb --> app : "Solicitud en revisión"
+else Sin coincidencias
+  onb -> kong : POST /customers (Idempotency-Key = session_id)
+  kong -> core : Alta de cliente + cuenta inicial (Core) y perfil (CRM)
+  core --> kong : customer_id, account_id
+  kong --> onb : customer_id
+  onb -> idp : SCIM: POST /Users (estado: credenciales pendientes)
+  idp --> onb : user_id
+  onb -> s3 : Evidencias (documento, selfie, scores, decisión) con retención WORM;\n eventos OnboardingCompleted + auditoría (outbox → Kafka)
+  onb --> app : Estado COMPLETADO + enlace de enrolamiento (token de un solo uso)
+end
+
+== 5. Enrolamiento de credenciales (integración con OAuth 2.0 / OIDC) ==
+app -> idp : /authorize (Code + PKCE, prompt=create, token de enrolamiento)
+idp -> app : Define clave (política) + registra passkey (WebAuthn) / huella
+app -> app : Genera llave FIDO2 en Keystore; la biometría se valida localmente
+app -> idp : Credencial pública FIDO2 + device binding
+idp --> app : Tokens de la primera sesión (Authorization Code + PKCE)
+app --> cli : Bienvenida; notificación de apertura por push / SMS y correo
+note over cli, idp : A partir de aquí el cliente ingresa con usuario y clave + MFA, o con huella / rostro (passkey FIDO2), según el diagrama de autenticación
+@enduml

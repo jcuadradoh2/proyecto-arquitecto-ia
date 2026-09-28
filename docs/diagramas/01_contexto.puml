@@ -1,0 +1,41 @@
+@startuml 01_contexto
+!include <C4/C4_Context>
+LAYOUT_TOP_DOWN()
+title Diagrama de Contexto (C4 – Nivel 1): Sistema de Banca por Internet BP
+
+Person(cliente, "Cliente BP", "Persona con productos en BP. Consulta el histórico de movimientos y realiza transferencias y pagos entre cuentas propias e interbancarias desde la web o la app móvil.")
+Person(nuevo, "Cliente nuevo", "Se registra desde la app móvil mediante Onboarding digital con reconocimiento facial; luego accede con clave, huella o rostro.")
+Person(operador, "Operador BP / Oficial de Cumplimiento", "Monitorea la plataforma, administra parámetros (límites, canales) y consulta la auditoría de acciones del cliente.")
+Person_Ext(regulador, "Regulador / Auditor externo", "Superintendencia de Bancos, UAFE y auditoría externa. Reciben reportes de auditoría y cumplimiento.")
+
+Enterprise_Boundary(bp_ent, "Entidad Financiera BP – sistemas internos") {
+  System(bp, "Sistema de Banca por Internet BP", "Plataforma digital (Web + Móvil) para consultar movimientos, realizar transferencias y pagos entre cuentas propias e interbancarias, registrarse (Onboarding) y recibir la notificación de cada movimiento.")
+  System(core, "Core Bancario", "Sistema de registro: datos básicos del cliente, productos, saldos y movimientos. Ejecuta las transferencias entre cuentas propias.")
+  System(crm, "Sistema de Información Complementaria del Cliente", "Complementa la información del cliente cuando se requiere en detalle: perfil ampliado, contactos, documentos y segmentación.")
+  System(idp, "Servidor de Identidad Corporativo (IdP)", "Producto existente configurado como Authorization Server OAuth 2.0 / OpenID Connect: credenciales, MFA, biometría FIDO2 y emisión de tokens.")
+  System(fraude, "Motor Antifraude", "Evalúa en línea el riesgo de cada transacción (reglas, scoring, comportamiento del dispositivo).")
+}
+
+System_Ext(ach, "Red de Pagos Interbancarios (ACH / SPI del BCE)", "Compensa y liquida las transferencias hacia cuentas de otras entidades financieras.")
+System_Ext(kyc, "Proveedor de Verificación Biométrica (KYC)", "Prueba de vida y comparación facial durante el Onboarding (p. ej. Amazon Rekognition Face Liveness o Facephi).")
+System_Ext(registro, "Registro Civil / Listas de Control AML", "Valida la identidad del ciudadano y consulta listas de control (PEP, OFAC, ONU).")
+System_Ext(notif1, "Plataforma de Notificaciones Cloud", "Amazon SNS (push / SMS) y Amazon SES (correo): canal principal de notificaciones.")
+System_Ext(notif2, "Proveedor de Mensajería Externo", "Twilio / WhatsApp Business API: canal alterno (SMS, WhatsApp) por preferencia del cliente y como contingencia.")
+
+Rel(cliente, bp, "Consulta movimientos, transfiere y paga", "HTTPS – Web SPA y App móvil")
+Rel(nuevo, bp, "Se registra con reconocimiento facial", "HTTPS – App móvil")
+Rel(operador, bp, "Monitorea, parametriza y consulta auditoría", "HTTPS – consola interna")
+Rel(bp, regulador, "Entrega reportes de auditoría y cumplimiento", "Reportes periódicos / SFTP")
+
+Rel(bp, idp, "Delega la autenticación y autorización de usuarios; valida tokens", "OAuth 2.0 / OIDC sobre HTTPS")
+Rel(bp, core, "Consulta clientes, productos y movimientos; ejecuta transferencias propias", "APIs vía capa de integración (REST / mTLS)")
+Rel(bp, crm, "Obtiene la información detallada del cliente", "APIs vía capa de integración (REST / mTLS)")
+Rel(bp, fraude, "Solicita la evaluación de riesgo de cada transacción", "REST / mTLS")
+Rel(bp, ach, "Envía órdenes de transferencia interbancaria y recibe confirmaciones", "ISO 20022 / API firmada, mTLS")
+Rel(bp, kyc, "Verifica prueba de vida y coincidencia facial", "HTTPS / SDK")
+Rel(bp, registro, "Valida identidad y consulta listas de control", "HTTPS / Web Services")
+Rel(bp, notif1, "Envía notificaciones de movimientos (push, SMS, correo)", "HTTPS")
+Rel(bp, notif2, "Envía notificaciones de movimientos (SMS, WhatsApp)", "HTTPS")
+
+SHOW_LEGEND()
+@enduml

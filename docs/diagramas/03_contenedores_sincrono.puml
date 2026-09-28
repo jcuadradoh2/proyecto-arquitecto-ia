@@ -1,0 +1,93 @@
+@startuml 03_contenedores_sincrono
+!include <C4/C4_Container>
+!include <awslib/AWSCommon>
+!include <awslib/NetworkingContentDelivery/CloudFront>
+!include <awslib/ApplicationIntegration/APIGateway>
+!include <awslib/Database/Aurora>
+!include <awslib/Database/DynamoDB>
+!include <awslib/Database/ElastiCache>
+!include <awslib/Storage/SimpleStorageService>
+!include <awslib/MachineLearning/Rekognition>
+LAYOUT_TOP_DOWN()
+skinparam wrapWidth 150
+title Diagrama de Contenedores (C4 – Nivel 2) – Vista de detalle A: flujo síncrono de canales, servicios de negocio y capa de integración
+
+Person(cliente, "Cliente BP", "Web y móvil")
+
+System_Boundary(bp, "Sistema de Banca por Internet BP") {
+  Container(spa, "Web SPA", "Angular (LTS vigente)", "Banca web; sesión vía BFF (sin tokens en el navegador)")
+  Container(app, "App Móvil", "Flutter", "Consultas, transferencias, Onboarding facial, login biométrico")
+  Container(cdn, "CDN + WAF + Shield", "Amazon CloudFront / AWS WAF", "Estáticos de la SPA, filtrado OWASP, anti-DDoS", $sprite="CloudFront")
+  Container(apigw, "API Gateway de Canales", "Amazon API Gateway", "Valida JWT (JWKS), throttling, cuotas, esquemas", $sprite="APIGateway")
+  Container(bffweb, "BFF Web", "Spring Boot", "Token handler + agregación para la SPA")
+  Container(bffmob, "BFF Móvil", "Spring Boot", "Agregación y payloads ligeros para la app; atestación")
+
+  Boundary(svcs, "Microservicios de negocio (EKS + Istio, mTLS)") {
+    Container(svcCli, "Servicio de Clientes", "Spring Boot", "Datos básicos (Core) + detallados (CRM)")
+    Container(svcProd, "Servicio de Productos y Saldos", "Spring Boot", "Cuentas, tarjetas y saldos")
+    Container(svcMov, "Servicio de Movimientos", "Spring Boot", "Histórico paginado con caché (CQRS)")
+    Container(svcTrf, "Servicio de Transferencias y Pagos", "Spring Boot", "Saga, idempotencia, límites, antifraude")
+    Container(svcBen, "Servicio de Beneficiarios", "Spring Boot", "Cuentas destino frecuentes")
+    Container(svcOnb, "Servicio de Onboarding", "Spring Boot", "Registro digital con reconocimiento facial")
+  }
+  Boundary(integ, "Capa de integración") {
+    Container(intgw, "API Gateway de Integración", "Kong Gateway", "mTLS, credenciales, cuotas, mediación REST/SOAP, ruteo por tipo de transacción")
+    Container(adapt, "Conectores de Integración (ACL)", "Spring Boot / Resilience4j", "Adaptadores Core, CRM, ACH, KYC, Registro Civil; circuit breaker y reintentos")
+  }
+  ContainerDb(dbtx, "BD Transaccional", "Aurora PostgreSQL", "Órdenes, sagas, beneficiarios, outbox", $sprite="Aurora")
+  ContainerDb(cache, "Caché", "ElastiCache Redis", "Movimientos, clientes, sesiones", $sprite="ElastiCache")
+  ContainerDb(ddb, "Idempotencia / Frecuentes", "DynamoDB", "Claves de idempotencia, perfil frecuente", $sprite="DynamoDB")
+  ContainerDb(s3onb, "Evidencias Onboarding", "S3 Object Lock", "Documentos y selfies cifrados", $sprite="SimpleStorageService")
+}
+
+System_Ext(idp, "IdP Corporativo", "OAuth 2.0 / OIDC")
+System_Ext(core, "Core Bancario", "SoR")
+System_Ext(crm, "Sistema Complementario (CRM)", "Detalle del cliente")
+System_Ext(ach, "Red ACH / SPI", "Interbancarias")
+System_Ext(fraude, "Motor Antifraude", "Scoring")
+System_Ext(kyc, "Verificación Biométrica", "Rekognition / Facephi", $sprite="Rekognition")
+System_Ext(regciv, "Registro Civil / Listas AML", "Identidad, PEP/OFAC")
+
+Rel(cliente, spa, "Usa", "HTTPS")
+Rel(cliente, app, "Usa", "HTTPS")
+Rel(spa, cdn, "Estáticos + APIs", "HTTPS")
+Rel(app, cdn, "APIs", "HTTPS, pinning")
+Rel(cdn, apigw, "Tráfico filtrado", "HTTPS")
+Rel(app, idp, "Auth Code + PKCE, MFA/FIDO2", "OIDC")
+Rel(bffweb, idp, "Auth Code + PKCE (confidencial)", "OIDC")
+Rel(apigw, idp, "JWKS", "HTTPS")
+Rel(apigw, bffweb, "/web/*", "HTTPS (VPC Link)")
+Rel(apigw, bffmob, "/mobile/*", "HTTPS (VPC Link)")
+Rel(bffweb, cache, "Sesiones", "TLS")
+Rel(bffweb, svcCli, "Cliente", "REST/gRPC, mTLS")
+Rel(bffweb, svcProd, "Saldos", "gRPC, mTLS")
+Rel(bffweb, svcMov, "Movimientos", "REST, mTLS")
+Rel(bffweb, svcTrf, "Transferencias", "REST, mTLS")
+Rel(bffmob, svcCli, "Cliente", "REST/gRPC, mTLS")
+Rel(bffmob, svcProd, "Saldos", "gRPC, mTLS")
+Rel(bffmob, svcMov, "Movimientos", "REST, mTLS")
+Rel(bffmob, svcTrf, "Transferencias", "REST, mTLS")
+Rel(bffmob, svcBen, "Beneficiarios", "REST, mTLS")
+Rel(bffmob, svcOnb, "Onboarding", "REST, mTLS")
+Rel(svcCli, intgw, "Datos básicos / detallados", "REST, mTLS")
+Rel(svcProd, intgw, "Productos y saldos", "REST, mTLS")
+Rel(svcMov, intgw, "Movimientos", "REST, mTLS")
+Rel(svcTrf, intgw, "Transferencia propia o interbancaria según tipo", "REST, mTLS")
+Rel(svcOnb, intgw, "Alta de cliente, KYC", "REST, mTLS")
+Rel(intgw, adapt, "Enruta por tipo", "REST, mTLS")
+Rel(adapt, core, "Consultas y operaciones", "REST/SOAP, mTLS (Direct Connect)")
+Rel(adapt, crm, "Detalle del cliente", "REST, mTLS")
+Rel(adapt, ach, "pacs.008 / pacs.002", "ISO 20022, mTLS + firma")
+Rel(adapt, kyc, "Liveness / CompareFaces", "HTTPS (IAM)")
+Rel(adapt, regciv, "Identidad / screening", "HTTPS / WS")
+Rel(svcTrf, fraude, "Score de riesgo", "REST, mTLS")
+Rel(svcOnb, idp, "Crea usuario y credenciales", "SCIM, mTLS")
+Rel(svcTrf, dbtx, "Órdenes, sagas, outbox", "JDBC/TLS")
+Rel(svcBen, dbtx, "Beneficiarios", "JDBC/TLS")
+Rel(svcTrf, ddb, "Idempotencia", "HTTPS")
+Rel(svcMov, cache, "Cache-aside", "TLS")
+Rel(svcCli, cache, "Cache-aside", "TLS")
+Rel(svcCli, ddb, "Perfil frecuente (L2)", "HTTPS")
+Rel(svcOnb, s3onb, "Evidencias", "HTTPS (KMS)")
+SHOW_LEGEND()
+@enduml

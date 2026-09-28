@@ -1,0 +1,74 @@
+@startuml 04_contenedores_asincrono
+!include <C4/C4_Container>
+!include <awslib/AWSCommon>
+!include <awslib/Compute/Lambda>
+!include <awslib/Analytics/ManagedStreamingforApacheKafka>
+!include <awslib/ApplicationIntegration/SimpleQueueService>
+!include <awslib/Database/Aurora>
+!include <awslib/Database/DynamoDB>
+!include <awslib/Database/ElastiCache>
+!include <awslib/Storage/SimpleStorageService>
+!include <awslib/Analytics/OpenSearchService>
+!include <awslib/ManagementGovernance/CloudWatch>
+!include <awslib/SecurityIdentityCompliance/KeyManagementService>
+!include <awslib/ApplicationIntegration/SimpleNotificationService>
+!include <awslib/BusinessApplications/SimpleEmailService>
+LAYOUT_TOP_DOWN()
+skinparam wrapWidth 150
+title Diagrama de Contenedores (C4 – Nivel 2) – Vista de detalle B: flujo asíncrono (eventos, auditoría, notificaciones, clientes frecuentes y plataforma)
+
+System_Boundary(bp, "Sistema de Banca por Internet BP") {
+  Boundary(prod, "Productores de eventos") {
+    Container(bffs, "BFF Web / BFF Móvil", "Spring Boot", "Eventos de uso (login, consultas) y auditoría de canal")
+    Container(svcTrf, "Servicio de Transferencias y Pagos", "Spring Boot", "TransferAccepted / Completed / Failed (outbox)")
+    Container(svcOnb, "Servicio de Onboarding", "Spring Boot", "OnboardingStarted / Completed / Held")
+    Container(svcOtros, "Clientes, Movimientos, Productos, Beneficiarios", "Spring Boot", "Eventos de auditoría de cada acción (AuditInterceptor + outbox)")
+  }
+  ContainerQueue(kafka, "Bus de Eventos", "Amazon MSK (Kafka, 3 AZ, RF=3)", "Tópicos: audit-events, usage-events, transfer-events, onboarding-events, core-cdc", $sprite="ManagedStreamingforApacheKafka")
+  ContainerQueue(sqs, "Cola de Notificaciones + DLQ", "Amazon SQS", "Buffer con reintentos y mensajes muertos", $sprite="SimpleQueueService")
+
+  Boundary(cons, "Consumidores") {
+    Container(svcAud, "Servicio de Auditoría", "Spring Boot", "Consumidor idempotente, enmascarado PII, cadena de hashes, escritura append-only")
+    Container(svcPerf, "Servicio de Perfil Digital (clientes frecuentes)", "Kafka Streams + Lambda", "Analiza frecuencia, materializa perfil, refresh-ahead")
+    Container(svcNot, "Servicio de Notificaciones", "AWS Lambda", "Estrategia por canal, plantillas, preferencias, contingencia entre proveedores", $sprite="Lambda")
+  }
+  ContainerDb(dbaud, "BD de Auditoría", "Aurora PostgreSQL (append-only)", "Registros encadenados", $sprite="Aurora")
+  ContainerDb(s3aud, "Archivo WORM", "S3 Object Lock + Glacier", "Retención regulatoria", $sprite="SimpleStorageService")
+  ContainerDb(osaud, "Búsqueda de Auditoría", "Amazon OpenSearch", "Consultas y analítica", $sprite="OpenSearchService")
+  ContainerDb(ddb, "Vista Clientes Frecuentes / Estado de notificaciones", "DynamoDB (Global Tables, TTL)", "Perfil consolidado; entregas", $sprite="DynamoDB")
+  ContainerDb(cache, "Caché", "ElastiCache Redis", "Hot data por cliente", $sprite="ElastiCache")
+  Container(obs, "Observabilidad", "CloudWatch, X-Ray/OTel, Prometheus, Grafana", "Métricas, logs, trazas, alertas", $sprite="CloudWatch")
+  Container(sec, "Llaves y Secretos", "KMS, CloudHSM, Secrets Manager", "Cifrado y firma", $sprite="KeyManagementService")
+}
+System_Ext(core, "Core Bancario", "Eventos de movimientos (CDC)")
+System_Ext(snsses, "Amazon SNS / SES", "Push (APNs/FCM), SMS, correo", $sprite="SimpleNotificationService")
+System_Ext(twilio, "Twilio / WhatsApp Business", "SMS y WhatsApp (canal alterno)")
+System_Ext(siem, "SIEM corporativo", "Correlación de seguridad")
+Person(oficial, "Oficial de Cumplimiento", "Consulta auditoría")
+
+Rel(bffs, kafka, "usage-events, audit-events", "Kafka / TLS + IAM")
+Rel(svcTrf, kafka, "transfer-events, audit-events (outbox)", "Kafka / TLS + IAM")
+Rel(svcOnb, kafka, "onboarding-events", "Kafka / TLS + IAM")
+Rel(svcOtros, kafka, "audit-events, usage-events", "Kafka / TLS + IAM")
+Rel(core, kafka, "core-cdc (nuevos movimientos)", "Debezium / MSK Connect")
+Rel(kafka, svcAud, "audit-events", "Kafka")
+Rel(kafka, svcPerf, "usage-events, core-cdc, transfer-events", "Kafka")
+Rel(kafka, sqs, "transfer-events, onboarding-events", "MSK Connect (sink)")
+Rel(sqs, svcNot, "Event source mapping", "")
+Rel(svcAud, dbaud, "INSERT append-only", "JDBC / TLS")
+Rel(svcAud, s3aud, "Lotes firmados", "HTTPS (SDK)")
+Rel(svcAud, osaud, "Indexa", "HTTPS")
+Rel(svcAud, sec, "Firma de cierres", "KMS")
+Rel(svcPerf, ddb, "Perfil materializado", "HTTPS (SDK)")
+Rel(svcPerf, cache, "Precarga / invalidación", "TLS")
+Rel(svcPerf, core, "Datos a materializar", "vía capa de integración")
+Rel(svcNot, snsses, "Push / SMS / correo", "HTTPS")
+Rel(svcNot, twilio, "SMS / WhatsApp (contingencia)", "HTTPS")
+Rel(svcNot, ddb, "Estado y evidencia de entrega", "HTTPS (SDK)")
+Rel(svcNot, kafka, "NotificationSent (auditoría)", "Kafka")
+Rel(osaud, siem, "Eventos de seguridad", "HTTPS")
+Rel(oficial, svcAud, "Consulta trazabilidad (API RBAC)", "HTTPS + OIDC")
+Rel(cons, obs, "Telemetría", "OTLP")
+Rel(prod, obs, "Telemetría", "OTLP")
+SHOW_LEGEND()
+@enduml

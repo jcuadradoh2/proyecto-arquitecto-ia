@@ -1,0 +1,54 @@
+@startuml 07_componentes_auditoria
+!include <C4/C4_Component>
+!include <awslib/AWSCommon>
+!include <awslib/Analytics/ManagedStreamingforApacheKafka>
+!include <awslib/Database/Aurora>
+!include <awslib/Storage/SimpleStorageService>
+!include <awslib/Analytics/OpenSearchService>
+!include <awslib/SecurityIdentityCompliance/KeyManagementService>
+LAYOUT_TOP_DOWN()
+skinparam wrapWidth 160
+title Diagrama de Componentes (C4 – Nivel 3): Solución de Auditoría – registro de todas las acciones del cliente
+
+Container_Boundary(src, "Fuentes de auditoría (patrón transversal en BFF y microservicios)") {
+  Component(gwlog, "Logs de acceso del API Gateway", "Amazon API Gateway → CloudWatch Logs → Kinesis Data Streams", "Quién, qué endpoint, cuándo, desde dónde (IP, user-agent, device-id) y resultado HTTP.")
+  Component(aop, "AuditInterceptor", "Aspecto (AOP) / filtro en cada servicio", "Captura la acción de negocio: sujeto (sub), acción, recurso, canal, trace-id, antes / después (enmascarado).")
+  Component(obx, "Outbox de Auditoría", "Tabla outbox + Debezium (MSK Connect)", "Cada acción confirmada genera exactamente un evento: atomicidad con la transacción de negocio.")
+}
+ContainerQueue(kafka, "Tópico audit-events", "Amazon MSK – particionado por cliente, retención 7 días, cifrado", "Buffer durable y replay", $sprite="ManagedStreamingforApacheKafka")
+
+Container_Boundary(aud, "Servicio de Auditoría [Spring Boot – Amazon EKS, desplegado en cuenta AWS separada (segregación de funciones)]") {
+  Component(cons, "Consumidor Idempotente", "Kafka consumer – deduplicación por event-id", "Exactly-once efectivo; DLQ para eventos malformados.")
+  Component(norm, "Normalizador y Enmascarado", "Esquema canónico (JSON Schema) + tokenización PII", "Estructura común; enmascara cuentas y documento; conserva referencias.")
+  Component(chain, "Constructor de Cadena de Hashes", "SHA-256 encadenado + firma diaria con AWS KMS (llave asimétrica)", "Cada registro incluye el hash del anterior; el cierre diario se firma: evidencia de integridad anti-manipulación.")
+  Component(writer, "Escritor Append-Only", "JDBC – rol sin UPDATE / DELETE, particionado mensual", "Persiste el registro en la BD de auditoría.")
+  Component(arch, "Archivador WORM", "S3 Object Lock (modo cumplimiento) + lifecycle a Glacier", "Retención de largo plazo, inmutable incluso para administradores.")
+  Component(idx, "Indexador de Búsqueda", "OpenSearch (hot 90 días)", "Búsqueda por cliente, acción, fecha, canal; detección de anomalías.")
+  Component(qapi, "API de Consulta y Reportes", "REST + RBAC (oficial de cumplimiento) – mTLS", "Trazabilidad por cliente, reportes al regulador y verificación de integridad de la cadena.")
+}
+ContainerDb(dbaud, "BD de Auditoría", "Amazon Aurora PostgreSQL (cifrada KMS, Multi-AZ, Global DB)", "Registros inmutables", $sprite="Aurora")
+ContainerDb(s3, "Archivo Inmutable", "Amazon S3 Object Lock + Glacier", "Retención ≥ 10 años (parametrizable)", $sprite="SimpleStorageService")
+ContainerDb(os, "Índice de Auditoría", "Amazon OpenSearch Service", "Búsqueda y analítica", $sprite="OpenSearchService")
+Container(kms, "AWS KMS", "Llave asimétrica de firma", "Firma de cierres diarios", $sprite="KeyManagementService")
+Person(oficial, "Oficial de Cumplimiento / Auditor", "")
+System_Ext(siem, "SIEM corporativo", "Splunk / Microsoft Sentinel")
+
+Rel(gwlog, kafka, "Publica eventos de acceso", "Kinesis → Kafka / TLS")
+Rel(aop, obx, "Escribe el evento en la misma transacción", "JDBC")
+Rel(obx, kafka, "Publica (CDC)", "Kafka / TLS + IAM")
+Rel(kafka, cons, "Consume", "Kafka / TLS")
+Rel(cons, norm, "Evento validado", "")
+Rel(norm, chain, "Evento canónico", "")
+Rel(chain, kms, "Firma el cierre diario", "HTTPS (IAM)")
+Rel(chain, writer, "Registro encadenado", "")
+Rel(writer, dbaud, "INSERT (append-only)", "JDBC / TLS")
+Rel(writer, arch, "Lote horario", "")
+Rel(arch, s3, "PutObject con retención", "HTTPS (SDK)")
+Rel(writer, idx, "Indexa", "")
+Rel(idx, os, "Bulk index", "HTTPS / TLS")
+Rel(qapi, dbaud, "Consulta", "JDBC / TLS")
+Rel(qapi, os, "Búsqueda", "HTTPS")
+Rel(oficial, qapi, "Consulta trazabilidad y reportes", "HTTPS + OIDC (rol)")
+Rel(idx, siem, "Reenvía eventos de seguridad", "HTTPS")
+SHOW_LEGEND()
+@enduml

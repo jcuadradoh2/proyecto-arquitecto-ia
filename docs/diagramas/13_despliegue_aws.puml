@@ -1,0 +1,120 @@
+@startuml 13_despliegue_aws
+!include <C4/C4_Deployment>
+!include <awslib/AWSCommon>
+!include <awslib/Groups/AWSCloud>
+!include <awslib/Groups/Region>
+!include <awslib/Groups/VPC>
+!include <awslib/Groups/AvailabilityZone>
+!include <awslib/Groups/Corporatedatacenter>
+!include <awslib/General/MobileClient>
+!include <awslib/General/Client>
+!include <awslib/NetworkingContentDelivery/CloudFront>
+!include <awslib/NetworkingContentDelivery/Route53>
+!include <awslib/NetworkingContentDelivery/GlobalAccelerator>
+!include <awslib/NetworkingContentDelivery/DirectConnect>
+!include <awslib/ApplicationIntegration/APIGateway>
+!include <awslib/Containers/ElasticKubernetesService>
+!include <awslib/Database/Aurora>
+!include <awslib/Database/DynamoDB>
+!include <awslib/Database/ElastiCache>
+!include <awslib/Analytics/ManagedStreamingforApacheKafka>
+!include <awslib/Analytics/OpenSearchService>
+!include <awslib/Storage/SimpleStorageService>
+!include <awslib/Compute/Lambda>
+!include <awslib/SecurityIdentityCompliance/KeyManagementService>
+!include <awslib/SecurityIdentityCompliance/WAF>
+!include <awslib/SecurityIdentityCompliance/GuardDuty>
+!include <awslib/ManagementGovernance/CloudWatch>
+!include <awslib/MachineLearning/Rekognition>
+LAYOUT_TOP_DOWN()
+skinparam wrapWidth 150
+title Diagrama de Despliegue (C4): Infraestructura AWS – Multi-AZ activo-activo en us-east-1 + DR warm standby en us-east-2 + Data Center BP
+
+Deployment_Node(cliente, "Dispositivos del cliente", "Internet – Ecuador y exterior") {
+  Container(spa, "Web SPA", "Angular (LTS vigente) – navegador", "", $sprite="Client")
+  Container(app, "App Móvil", "Flutter – iOS / Android", "", $sprite="MobileClient")
+}
+
+Deployment_Node(aws, "AWS – Organización BP (AWS Control Tower: cuentas prod, dr, seguridad, auditoría, shared-services)", "AWS Organizations + SCPs", "", $sprite="AWSCloud") {
+  Deployment_Node(edge, "Borde global", "Amazon Route 53 (health checks + failover) · CloudFront · AWS WAF · Shield Advanced · Global Accelerator", "", $sprite="CloudFront") {
+    Container(cdn, "CDN + WAF + Anti-DDoS", "CloudFront + WAF managed rules + Shield Advanced", "Sirve la SPA (S3 origin) y protege las APIs; TLS 1.3, HSTS, geo-restricción", $sprite="WAF")
+    Container(ga, "Global Accelerator", "Anycast IPs estáticas", "Enrutamiento por salud hacia la región activa; failover < 30 s", $sprite="GlobalAccelerator")
+    Container(dns, "Route 53", "DNS + health checks", "Failover DNS hacia DR (TTL 60 s)", $sprite="Route53")
+  }
+
+  Deployment_Node(prod, "Región primaria us-east-1 (N. Virginia) – ACTIVA", "cuenta bp-prod", "", $sprite="Region") {
+    Container(apigw, "API Gateway de Canales", "Amazon API Gateway (regional, WAF, JWT Authorizer)", "Integración privada hacia EKS por VPC Link", $sprite="APIGateway")
+    Deployment_Node(vpc, "VPC producción 10.10.0.0/16", "3 zonas de disponibilidad; subredes privadas; salida por NAT; VPC endpoints (S3, DynamoDB, Rekognition, KMS, Secrets Manager)", "", $sprite="VPC") {
+      Deployment_Node(azs, "AZ us-east-1a · 1b · 1c (topología idéntica replicada en cada AZ)", "Pod anti-affinity + topology spread; PodDisruptionBudgets", "", $sprite="AvailabilityZone") {
+        Deployment_Node(eks, "Amazon EKS", "Nodos Graviton (Karpenter, 3 → 30 nodos) · Istio (mTLS STRICT) · HPA / KEDA · Argo Rollouts", "", $sprite="ElasticKubernetesService") {
+          Container(bff, "BFF Web / BFF Móvil", "Spring Boot", "3+ réplicas por servicio")
+          Container(ms, "Microservicios BP", "Clientes · Productos · Movimientos · Transferencias · Beneficiarios · Perfil Digital · Onboarding · Auditoría (cuenta separada)", "")
+          Container(kong, "API Gateway de Integración + Conectores ACL", "Kong + Spring Boot", "Salida hacia Core / CRM / ACH / IdP")
+          Container(otel, "Observabilidad", "OTel Collector (DaemonSet) · Istio telemetry", "")
+        }
+        ContainerDb(aurora, "Amazon Aurora PostgreSQL", "1 writer + 2 réplicas (Multi-AZ) – Aurora Global Database", "BD transaccional; BD de auditoría en cuenta separada", $sprite="Aurora")
+        ContainerDb(redis, "Amazon ElastiCache for Redis", "Cluster mode: 3 shards × 2 réplicas, Multi-AZ, Global Datastore", "Caché L1, sesiones BFF", $sprite="ElastiCache")
+        ContainerQueue(msk, "Amazon MSK", "3 brokers (uno por AZ), RF = 3, min.insync.replicas = 2", "Bus de eventos", $sprite="ManagedStreamingforApacheKafka")
+        ContainerDb(os, "Amazon OpenSearch Service", "3 nodos dedicados master + 6 data, Multi-AZ", "Índice de auditoría / logs de seguridad", $sprite="OpenSearchService")
+      }
+    }
+    Deployment_Node(regional, "Servicios regionales gestionados (serverless / multi-AZ por diseño)", "", "") {
+      ContainerDb(ddb, "Amazon DynamoDB", "Global Tables (us-east-1 ↔ us-east-2), PITR", "Clientes frecuentes, idempotencia", $sprite="DynamoDB")
+      ContainerDb(s3, "Amazon S3", "Object Lock (compliance), CRR a DR, lifecycle a Glacier", "Evidencias, auditoría WORM, backups", $sprite="SimpleStorageService")
+      Container(srvless, "Notificaciones", "AWS Lambda + SQS (DLQ) + SNS + SES", "Canal 1 de notificación", $sprite="Lambda")
+      Container(kms, "Seguridad de datos", "AWS KMS (multi-región) + CloudHSM + Secrets Manager + ACM", "Llaves, secretos, certificados", $sprite="KeyManagementService")
+      Container(secops, "Seguridad y cumplimiento", "GuardDuty · Security Hub · Inspector · CloudTrail (org) · AWS Config · Macie", "", $sprite="GuardDuty")
+      Container(obs, "Monitoreo", "CloudWatch · X-Ray · Managed Prometheus · Managed Grafana · Synthetics", "", $sprite="CloudWatch")
+      Container(rek, "Amazon Rekognition + Textract", "Face Liveness, CompareFaces, AnalyzeID", "Onboarding", $sprite="Rekognition")
+    }
+  }
+
+  Deployment_Node(dr, "Región DR us-east-2 (Ohio) – WARM STANDBY", "cuenta bp-dr · IaC idéntico (Terraform)", "", $sprite="Region") {
+    Container(apigw2, "API Gateway (standby)", "Amazon API Gateway", "Mismas rutas; activado por Route 53 / Global Accelerator", $sprite="APIGateway")
+    Container(eks2, "Amazon EKS (mínimo)", "1 nodo por AZ; Karpenter escala al activarse", "Mismas imágenes (ECR replicado)", $sprite="ElasticKubernetesService")
+    ContainerDb(aurora2, "Aurora Global Database – secundaria", "Réplica física, RPO < 1 s; promoción gestionada (RTO ≈ 1 min)", "", $sprite="Aurora")
+    ContainerDb(data2, "Datos replicados", "DynamoDB Global Tables · Redis Global Datastore · MSK Replicator · S3 CRR", "", $sprite="DynamoDB")
+  }
+}
+
+Deployment_Node(dc, "Data Center BP (on-premise) – activo / pasivo", "Dos sitios; conectividad AWS Direct Connect 2 × 1 Gbps (ubicaciones distintas) + VPN Site-to-Site de respaldo", "", $sprite="Corporatedatacenter") {
+  Container(core, "Core Bancario", "Sistema de registro", "")
+  Container(crm, "Sistema de Información Complementaria (CRM)", "", "")
+  Container(idp, "IdP Corporativo", "OAuth 2.0 / OIDC (producto existente)", "")
+  Container(fraude, "Motor Antifraude", "", "")
+}
+
+Deployment_Node(ext, "Terceros", "Internet / redes privadas") {
+  Container(ach, "Red ACH / SPI (BCE)", "ISO 20022 sobre mTLS", "")
+  Container(twilio, "Twilio / WhatsApp Business", "Canal 2 de notificación", "")
+}
+
+Rel(spa, cdn, "HTTPS (TLS 1.3)")
+Rel(app, cdn, "HTTPS + pinning")
+Rel(cdn, ga, "Origen: APIs")
+Rel(dns, ga, "Resolución / failover")
+Rel(ga, apigw, "Tráfico a la región activa")
+Rel(ga, apigw2, "Failover (conmutación por salud)")
+Rel(apigw, bff, "VPC Link + mTLS")
+Rel(bff, ms, "gRPC / REST (Istio mTLS)")
+Rel(ms, aurora, "JDBC / TLS – IAM auth")
+Rel(ms, redis, "TLS")
+Rel(ms, msk, "Kafka / TLS")
+Rel(ms, os, "HTTPS")
+Rel(ms, ddb, "VPC endpoint")
+Rel(ms, s3, "VPC endpoint")
+Rel(ms, rek, "VPC endpoint")
+Rel(msk, srvless, "Eventos → SQS → Lambda")
+Rel(ms, kong, "REST (Istio mTLS)")
+Rel(kong, core, "Direct Connect – mTLS", $sprite="DirectConnect")
+Rel(kong, crm, "Direct Connect – mTLS")
+Rel(kong, idp, "SCIM / OIDC (Direct Connect)")
+Rel(ms, fraude, "Direct Connect – mTLS (vía Kong)")
+Rel(kong, ach, "ISO 20022 / mTLS")
+Rel(srvless, twilio, "HTTPS (API)")
+Rel(aurora, aurora2, "Replicación física continua")
+Rel(ddb, data2, "Replicación multi-región")
+Rel(s3, data2, "Cross-Region Replication")
+Rel(otel, obs, "Métricas, logs, trazas")
+SHOW_LEGEND()
+@enduml

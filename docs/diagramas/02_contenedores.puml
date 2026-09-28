@@ -1,0 +1,130 @@
+@startuml 02_contenedores
+!include <C4/C4_Container>
+!include <awslib/AWSCommon>
+!include <awslib/NetworkingContentDelivery/CloudFront>
+!include <awslib/ApplicationIntegration/APIGateway>
+!include <awslib/Compute/Lambda>
+!include <awslib/Analytics/ManagedStreamingforApacheKafka>
+!include <awslib/ApplicationIntegration/SimpleQueueService>
+!include <awslib/Database/Aurora>
+!include <awslib/Database/DynamoDB>
+!include <awslib/Database/ElastiCache>
+!include <awslib/Storage/SimpleStorageService>
+!include <awslib/ManagementGovernance/CloudWatch>
+!include <awslib/SecurityIdentityCompliance/KeyManagementService>
+!include <awslib/MachineLearning/Rekognition>
+!include <awslib/ApplicationIntegration/SimpleNotificationService>
+LAYOUT_TOP_DOWN()
+skinparam wrapWidth 150
+title Diagrama de Contenedores (C4 – Nivel 2) – Vista general: Sistema de Banca por Internet BP
+
+Person(cliente, "Cliente BP", "Consulta movimientos, transfiere, paga y se registra (Onboarding).")
+
+System_Boundary(bp, "Sistema de Banca por Internet BP") {
+
+  Boundary(canales, "Canales (front-end)") {
+    Container(spa, "Web SPA", "Angular (LTS vigente) / TypeScript", "Aplicación web de banca publicada como estáticos en S3 + CloudFront. No almacena tokens en el navegador: la sesión la maneja el BFF.")
+    Container(app, "App Móvil", "Flutter (iOS / Android)", "App multiplataforma: consultas, transferencias, Onboarding facial y login con clave, huella o rostro (FIDO2 / passkeys).")
+  }
+
+  Boundary(borde, "Borde y seguridad perimetral (AWS)") {
+    Container(cdn, "CDN + WAF + Anti-DDoS", "Amazon CloudFront, AWS WAF, AWS Shield", "Entrega la SPA, filtra ataques (reglas OWASP, bots, rate-based) y absorbe DDoS. TLS 1.3 en el borde.", $sprite="CloudFront")
+    Container(apigw, "API Gateway de Canales", "Amazon API Gateway", "Único punto de entrada de APIs: valida JWT (OIDC), throttling y cuotas, validación de esquemas, enrutamiento a los BFF.", $sprite="APIGateway")
+  }
+
+  Boundary(bffs, "Servicios de canal – BFF (Amazon EKS)") {
+    Container(bffweb, "BFF Web", "Java 21 / Spring Boot", "Token handler de la SPA: ejecuta OAuth 2.0 Authorization Code + PKCE como cliente confidencial, mantiene la sesión (cookie HttpOnly) y agrega respuestas.")
+    Container(bffmob, "BFF Móvil", "Java 21 / Spring Boot", "Agrega y adapta respuestas para la app (payloads ligeros, paginación) y verifica la atestación del dispositivo.")
+  }
+
+  Boundary(svcs, "Microservicios de negocio (Amazon EKS + Istio, mTLS)") {
+    Container(svcCli, "Servicio de Clientes", "Spring Boot", "Consulta de datos básicos (Core) y complementarios (CRM). Compone la vista del cliente.")
+    Container(svcProd, "Servicio de Productos y Saldos", "Spring Boot", "Cuentas, tarjetas y saldos en línea; lectura de baja latencia.")
+    Container(svcMov, "Servicio de Movimientos", "Spring Boot", "Histórico de movimientos con paginación, filtros y caché (modelo de lectura CQRS).")
+    Container(svcTrf, "Servicio de Transferencias y Pagos", "Spring Boot", "Orquesta transferencias propias e interbancarias: Saga, idempotencia, límites, antifraude y step-up.")
+    Container(svcBen, "Servicio de Beneficiarios", "Spring Boot", "Cuentas destino frecuentes (propias e interbancarias) y sus validaciones.")
+    Container(svcPerf, "Servicio de Perfil Digital (clientes frecuentes)", "Spring Boot + Kafka Streams", "Detecta clientes frecuentes y materializa su información (vista precalculada) para respuestas de baja latencia.")
+    Container(svcOnb, "Servicio de Onboarding", "Spring Boot", "Orquesta el registro digital: documento, prueba de vida, validación de identidad, alta de cliente y enrolamiento de credenciales.")
+    Container(svcAud, "Servicio de Auditoría", "Spring Boot (consumidor Kafka)", "Ingesta los eventos de auditoría, construye la cadena de hashes y persiste registros inmutables.")
+    Container(svcNot, "Servicio de Notificaciones", "AWS Lambda + Amazon SQS", "Despacha notificaciones multicanal (estrategia por canal), reintentos, DLQ y contingencia entre proveedores.", $sprite="Lambda")
+  }
+
+  Boundary(integ, "Capa de integración") {
+    Container(intgw, "API Gateway de Integración", "Kong Gateway (EKS)", "Fachada interna hacia Core, CRM, ACH y KYC: mTLS, credenciales por consumidor, cuotas, mediación REST/SOAP y ruteo según el tipo de transacción.")
+    Container(adapt, "Conectores de Integración (ACL)", "Spring Boot / Resilience4j", "Anti-Corruption Layer: traducen el modelo canónico a los contratos del Core, CRM, ACH y KYC; circuit breaker, reintentos y timeouts.")
+  }
+
+  Boundary(msg, "Mensajería asíncrona") {
+    ContainerQueue(kafka, "Bus de Eventos", "Amazon MSK (Apache Kafka)", "Eventos de dominio, de auditoría y de uso. Orden por clave, retención y replay.", $sprite="ManagedStreamingforApacheKafka")
+    ContainerQueue(sqs, "Colas de Trabajo + DLQ", "Amazon SQS", "Desacopla el envío de notificaciones; reintentos con backoff y cola de mensajes muertos.", $sprite="SimpleQueueService")
+  }
+
+  Boundary(datos, "Datos") {
+    ContainerDb(dbtx, "BD Transaccional Banca Digital", "Amazon Aurora PostgreSQL (Multi-AZ, Global DB)", "Órdenes de transferencia, estados de saga, beneficiarios, preferencias y outbox.", $sprite="Aurora")
+    ContainerDb(cache, "Caché Distribuida", "Amazon ElastiCache for Redis", "Caché de movimientos y clientes frecuentes, rate limiting y sesiones del BFF Web.", $sprite="ElastiCache")
+    ContainerDb(ddb, "Vista de Clientes Frecuentes e Idempotencia", "Amazon DynamoDB (Global Tables, TTL)", "Perfil materializado del cliente frecuente, claves de idempotencia y estado de notificaciones.", $sprite="DynamoDB")
+    ContainerDb(dbaud, "BD de Auditoría", "Amazon Aurora PostgreSQL (append-only, cifrada)", "Registro inmutable de todas las acciones del cliente con cadena de hashes.", $sprite="Aurora")
+    ContainerDb(s3aud, "Archivo Inmutable y Búsqueda de Auditoría", "Amazon S3 Object Lock + Amazon OpenSearch", "Retención regulatoria (WORM, Glacier) y búsqueda / analítica de auditoría.", $sprite="SimpleStorageService")
+    ContainerDb(s3onb, "Evidencias de Onboarding", "Amazon S3 (cifrado KMS, Object Lock)", "Documentos, selfies y resultados de verificación con retención.", $sprite="SimpleStorageService")
+  }
+
+  Boundary(plat, "Plataforma transversal") {
+    Container(obs, "Observabilidad", "Amazon CloudWatch, AWS X-Ray / OpenTelemetry, Managed Prometheus + Grafana", "Métricas, logs, trazas distribuidas, alertas y dashboards de negocio.", $sprite="CloudWatch")
+    Container(sec, "Llaves y Secretos", "AWS KMS, CloudHSM, Secrets Manager", "Cifrado en reposo, llaves de firma (ACH, auditoría) y secretos con rotación.", $sprite="KeyManagementService")
+  }
+}
+
+System_Ext(idp, "Servidor de Identidad Corporativo", "OAuth 2.0 / OIDC (producto existente configurado)")
+System_Ext(core, "Core Bancario", "Clientes, productos, movimientos y transferencias propias")
+System_Ext(crm, "Sistema Complementario del Cliente", "Información detallada del cliente")
+System_Ext(ach, "Red Interbancaria (ACH / SPI)", "Transferencias interbancarias")
+System_Ext(fraude, "Motor Antifraude", "Scoring de riesgo transaccional")
+System_Ext(kyc, "Verificación Biométrica", "Amazon Rekognition Face Liveness / Facephi", $sprite="Rekognition")
+System_Ext(regciv, "Registro Civil / Listas AML", "Validación de identidad, PEP / OFAC")
+System_Ext(snsses, "Amazon SNS / SES", "Push, SMS y correo electrónico", $sprite="SimpleNotificationService")
+System_Ext(twilio, "Twilio / WhatsApp Business", "SMS y WhatsApp (canal alterno)")
+
+Rel(cliente, spa, "Usa", "HTTPS")
+Rel(cliente, app, "Usa", "HTTPS")
+Rel(spa, cdn, "Carga estáticos e invoca APIs", "HTTPS")
+Rel(app, cdn, "Invoca APIs", "HTTPS / TLS 1.3 + certificate pinning")
+Rel(cdn, apigw, "Reenvía tráfico filtrado", "HTTPS")
+Rel(app, idp, "Autentica: Authorization Code + PKCE, MFA / FIDO2", "OIDC / HTTPS")
+Rel(bffweb, idp, "Autentica por la SPA (cliente confidencial) y renueva tokens", "OIDC / HTTPS")
+Rel(apigw, idp, "Valida la firma de los JWT (JWKS)", "HTTPS")
+Rel(apigw, bffweb, "Enruta /web/*", "HTTPS (VPC Link)")
+Rel(apigw, bffmob, "Enruta /mobile/* con JWT", "HTTPS (VPC Link)")
+Rel(bffs, svcs, "Invocan los microservicios de negocio (ver vista de detalle)", "REST / gRPC, mTLS (Istio)")
+Rel(svcs, intgw, "Consultan y ejecutan operaciones según el tipo de transacción", "REST, mTLS")
+Rel(intgw, adapt, "Enruta por tipo de transacción", "REST, mTLS")
+Rel(adapt, core, "Consulta y ejecuta operaciones", "REST / SOAP, mTLS (Direct Connect)")
+Rel(adapt, crm, "Consulta detalle del cliente", "REST, mTLS")
+Rel(adapt, ach, "Envía órdenes y recibe confirmaciones", "ISO 20022, mTLS + firma")
+Rel(adapt, kyc, "Prueba de vida / comparación facial", "HTTPS (IAM)")
+Rel(adapt, regciv, "Valida identidad y screening", "HTTPS / WS")
+Rel(svcTrf, fraude, "Evalúa riesgo", "REST, mTLS")
+Rel(svcOnb, idp, "Crea usuario y credenciales", "SCIM, mTLS")
+Rel(svcTrf, dbtx, "Órdenes, sagas, outbox", "JDBC / TLS")
+Rel(svcBen, dbtx, "Beneficiarios", "JDBC / TLS")
+Rel(svcTrf, ddb, "Idempotencia", "HTTPS (SDK)")
+Rel(svcMov, cache, "Cache-aside", "TLS")
+Rel(svcCli, cache, "Cache-aside", "TLS")
+Rel(svcPerf, ddb, "Materializa perfil", "HTTPS (SDK)")
+Rel(svcPerf, cache, "Precarga", "TLS")
+Rel(svcOnb, s3onb, "Evidencias", "HTTPS (SDK, KMS)")
+Rel(bffweb, cache, "Sesiones", "TLS")
+Rel(svcs, kafka, "Publican eventos de dominio, uso y auditoría (outbox)", "Kafka / TLS + IAM")
+Rel(kafka, svcAud, "Eventos de auditoría", "Kafka")
+Rel(kafka, svcPerf, "Eventos de uso", "Kafka")
+Rel(kafka, sqs, "Fan-out de notificaciones", "MSK Connect")
+Rel(sqs, svcNot, "Dispara el envío", "Event source mapping")
+Rel(svcAud, dbaud, "Registros inmutables", "JDBC / TLS")
+Rel(svcAud, s3aud, "Archiva e indexa", "HTTPS (SDK)")
+Rel(svcNot, snsses, "Push / SMS / correo", "HTTPS")
+Rel(svcNot, twilio, "SMS / WhatsApp", "HTTPS")
+Rel(svcNot, ddb, "Estado de entrega", "HTTPS (SDK)")
+Rel(svcs, obs, "Métricas, logs y trazas (OpenTelemetry)", "OTLP / HTTPS")
+Rel(svcs, sec, "Secretos y cifrado", "HTTPS (IAM)")
+
+SHOW_LEGEND()
+@enduml

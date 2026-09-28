@@ -1,0 +1,71 @@
+@startuml 10_secuencia_login_spa
+!include _seq_style.iuml
+scale 1.4
+title Secuencia: Autenticación de la Web SPA mediante BFF (patrón Token Handler) – Authorization Code + PKCE con cliente confidencial
+autonumber "<b>[00]"
+
+actor "Cliente BP" as cli
+participant "Navegador\n(Angular SPA)" as spa
+box "AWS – Banca por Internet BP" #f4fbf5
+  participant "CloudFront + WAF\n+ Shield" as cdn
+  participant "BFF Web\n(Token Handler – Spring Boot)" as bff
+  database "Sesiones\n(ElastiCache Redis)" as redis
+  participant "API Gateway de Canales" as gw
+  participant "Microservicio\n(p. ej. Clientes)" as ms
+end box
+box "Data Center BP" #fbf4f4
+  participant "IdP Corporativo\n(OAuth 2.0 / OIDC)" as idp
+end box
+
+== Carga de la SPA ==
+cli -> spa : Abre https://banca.bp.com
+spa -> cdn : GET / (assets estáticos con SRI, CSP nonce, HSTS)
+cdn --> spa : SPA (Angular) servida desde S3 vía CloudFront
+spa -> bff : GET /bff/session
+bff --> spa : 401 sin sesión
+
+== Inicio de sesión (el navegador nunca ve tokens) ==
+spa -> bff : GET /bff/login
+bff -> bff : Genera state, nonce, code_verifier / code_challenge (S256)
+bff -> idp : POST /as/par (PAR) – client_id + autenticación private_key_jwt
+idp --> bff : request_uri
+bff --> spa : 302 https://idp.bp.com/authorize?request_uri=...\n(cookie temporal __Host-login, HttpOnly, SameSite=Lax)
+spa -> idp : GET /authorize
+idp -> spa : Página de login (usuario + clave)
+cli -> spa : Credenciales
+spa -> idp : POST credenciales
+idp -> idp : Evalúa riesgo; exige 2.º factor
+idp -> spa : Solicita OTP push / passkey (WebAuthn)
+cli -> spa : Aprueba en el móvil o usa passkey
+idp --> spa : 302 https://banca.bp.com/bff/callback?code=...&state=...
+spa -> bff : GET /bff/callback?code&state
+bff -> bff : Valida state (cookie temporal) y nonce
+bff -> idp : POST /token: code + code_verifier + client_assertion (private_key_jwt)
+idp --> bff : access_token (5 min), id_token, refresh_token (rotativo)
+bff -> redis : Guarda tokens en la sesión (cifrados, TTL)
+bff --> spa : 302 / + Set-Cookie: __Host-session (HttpOnly, Secure, SameSite=Strict)\n+ cookie CSRF (double-submit)
+
+== Consumo de APIs ==
+spa -> bff : GET /bff/api/customers/me\n(cookie de sesión + cabecera X-CSRF-Token)
+bff -> bff : Valida sesión, CSRF y Origin; renueva inactividad (5 min)
+bff -> redis : Obtiene access_token
+alt access_token expirado
+  bff -> idp : POST /token grant_type=refresh_token
+  idp --> bff : Nuevos tokens (rotación)
+  bff -> redis : Actualiza sesión
+end
+bff -> gw : GET /customers/me – Authorization: Bearer <access_token> (mTLS)
+gw -> gw : JWT Authorizer (JWKS, iss, aud, exp, scope)
+gw -> ms : Enruta (VPC Link + mTLS)
+ms --> gw : 200 datos del cliente
+gw --> bff : 200
+bff --> spa : 200 (sin tokens; solo datos)
+spa --> cli : Muestra la información
+
+== Cierre de sesión ==
+cli -> spa : Cerrar sesión (o inactividad 5 min / sesión absoluta 30 min)
+spa -> bff : POST /bff/logout
+bff -> idp : POST /revoke (refresh_token, RFC 7009) + RP-initiated logout
+bff -> redis : Elimina la sesión
+bff --> spa : 204 + cookie expirada
+@enduml

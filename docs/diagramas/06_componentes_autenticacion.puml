@@ -1,0 +1,56 @@
+@startuml 06_componentes_autenticacion
+!include <C4/C4_Component>
+!include <awslib/AWSCommon>
+!include <awslib/ApplicationIntegration/APIGateway>
+LAYOUT_TOP_DOWN()
+skinparam wrapWidth 160
+title Diagrama de Componentes (C4 – Nivel 3): Autenticación y Autorización (OAuth 2.0 / OIDC) – App Móvil, Web SPA e IdP
+
+Person(usuario, "Cliente BP", "Ingresa con clave, huella / rostro o passkey")
+
+Container_Boundary(appb, "App Móvil [Flutter – cliente público OAuth 2.0]") {
+  Component(authm, "Módulo de Autenticación", "flutter_appauth (AppAuth) – RFC 8252", "Authorization Code + PKCE (S256) con el navegador del sistema (ASWebAuthenticationSession / Custom Tabs); nunca WebView embebido.")
+  Component(biom, "Módulo Biométrico / Passkeys", "local_auth + FIDO2 / WebAuthn (autenticador de plataforma)", "Login con huella o rostro. La biometría no sale del dispositivo: se firma un reto con la llave privada.")
+  Component(store, "Almacenamiento Seguro", "iOS Keychain / Android Keystore (StrongBox)", "Refresh token, llave de dispositivo (DPoP) e identificadores, cifrados por hardware.")
+  Component(attest, "Atestación y Protección RASP", "Play Integrity API / Apple App Attest + detección de root / jailbreak y tampering", "Demuestra que la app y el dispositivo son genuinos antes de emitir tokens.")
+  Component(http, "Cliente HTTP Seguro", "Dio – TLS 1.3 + certificate pinning", "Adjunta access token con prueba DPoP y cabeceras de trazabilidad.")
+}
+
+Container_Boundary(webb, "Canal Web [Angular SPA + BFF Web – patrón Token Handler]") {
+  Component(spa, "Web SPA", "Angular (LTS vigente) – sin tokens en el navegador", "Usa una cookie de sesión HttpOnly + SameSite=Strict; CSP estricta y Trusted Types.")
+  Component(bffw, "BFF Web (Token Handler)", "Spring Boot – cliente confidencial OAuth 2.0", "Ejecuta Authorization Code + PKCE con client_secret / private_key_jwt; guarda tokens en sesión servidor (Redis) y protege con anti-CSRF.")
+}
+
+Container_Boundary(idpb, "Servidor de Identidad Corporativo [producto OAuth 2.0 / OIDC configurado – perfil FAPI 2.0]") {
+  Component(authz, "Authorization Endpoint + PAR", "OAuth 2.0 / OIDC, RFC 9126", "Inicia el flujo; exige PKCE S256, PAR, state y nonce.")
+  Component(mfa, "Motor MFA / Step-up adaptativo", "FIDO2 / WebAuthn, OTP push, señales de riesgo", "Elige el factor según riesgo; step-up (acr) para transferencias sobre el umbral.")
+  Component(token, "Token Endpoint", "RFC 6749 / RFC 9449 (DPoP)", "Emite access token JWT (5 min), ID token y refresh token con rotación y detección de reuso.")
+  Component(users, "Directorio de Usuarios y Credenciales", "Almacén del producto (hash Argon2id)", "Usuarios, llaves públicas FIDO2, dispositivos vinculados, políticas.")
+  Component(jwks, "Discovery / JWKS", "OIDC Discovery, RFC 7517", "Publica metadatos y llaves de verificación con rotación.")
+  Component(scim, "API de Administración", "SCIM 2.0 / Admin API (mTLS)", "Alta de usuarios y credenciales iniciales desde Onboarding.")
+}
+
+Container(apigw, "API Gateway de Canales", "Amazon API Gateway + AWS WAF", "JWT Authorizer: valida firma (JWKS), iss, aud, exp y scopes antes de enrutar a los microservicios.", $sprite="APIGateway")
+Container(ms, "Microservicios BP", "Spring Security OAuth2 Resource Server", "Revalidan el JWT, scopes, acr y DPoP; autorización fina (OPA / Verified Permissions).")
+Container(onb, "Servicio de Onboarding", "Spring Boot", "Enrola usuarios y credenciales (ver diagrama de Onboarding)")
+
+Rel(usuario, authm, "Ingresa clave o usa biometría", "")
+Rel(usuario, spa, "Navega e inicia sesión", "HTTPS")
+Rel(spa, bffw, "Llamadas a /api/* con cookie de sesión", "HTTPS – cookie HttpOnly + CSRF token")
+Rel(bffw, authz, "Redirige al login (Code + PKCE + PAR)", "HTTPS / navegador")
+Rel(bffw, token, "Intercambia code (cliente confidencial)", "HTTPS – private_key_jwt")
+Rel(bffw, apigw, "Invoca APIs con access token", "HTTPS / mTLS")
+Rel(authm, authz, "Inicia autorización (PAR + PKCE)", "HTTPS / navegador del sistema")
+Rel(authz, mfa, "Exige factores según riesgo", "")
+Rel(mfa, users, "Verifica credenciales / aserción FIDO2", "")
+Rel(biom, mfa, "Firma el reto WebAuthn", "HTTPS")
+Rel(authm, token, "Intercambia code + code_verifier", "HTTPS + DPoP")
+Rel(attest, token, "Atestación del dispositivo", "HTTPS")
+Rel_U(token, store, "Tokens (cifrados en hardware)", "")
+Rel(http, apigw, "Invoca APIs con access token", "HTTPS / TLS 1.3 + pinning + DPoP")
+Rel(apigw, jwks, "Llaves públicas (caché)", "HTTPS")
+Rel(apigw, ms, "Enruta con el JWT validado", "HTTPS (VPC Link) + mTLS")
+Rel(apigw, onb, "Enruta /onboarding/*", "HTTPS (VPC Link) + mTLS")
+Rel(onb, scim, "Crea usuario y credenciales iniciales", "SCIM 2.0, mTLS")
+SHOW_LEGEND()
+@enduml

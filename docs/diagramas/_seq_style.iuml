@@ -1,0 +1,27 @@
+skinparam shadowing false
+skinparam BackgroundColor white
+skinparam defaultFontSize 12
+skinparam ParticipantPadding 12
+skinparam BoxPadding 8
+skinparam sequence {
+  ArrowColor #24476b
+  LifeLineBorderColor #7f8c99
+  LifeLineBackgroundColor #eef3f8
+  ParticipantBorderColor #24476b
+  ParticipantBackgroundColor #dbe7f3
+  ParticipantFontStyle bold
+  ActorBorderColor #24476b
+  ActorBackgroundColor #dbe7f3
+  GroupBorderColor #24476b
+  GroupBackgroundColor #f4f7fb
+  GroupHeaderFontStyle bold
+  DividerBackgroundColor #dbe7f3
+}
+skinparam note {
+  BackgroundColor #fff8e1
+  BorderColor #c9a227
+}
+skinparam database {
+  BackgroundColor #dbe7f3
+  BorderColor #24476b
+}

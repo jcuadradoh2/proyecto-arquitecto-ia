@@ -1,0 +1,78 @@
+@startuml 09_secuencia_login_movil
+!include _seq_style.iuml
+scale 1.4
+title Secuencia: Autenticación en la App Móvil – OAuth 2.0 Authorization Code + PKCE + PAR + DPoP (RFC 6749 / 7636 / 8252 / 9126 / 9449)
+autonumber "<b>[00]"
+
+actor "Cliente BP" as cli
+box "Dispositivo del cliente" #f4f7fb
+  participant "App Móvil\n(Flutter · AppAuth)" as app
+  participant "Navegador del sistema\n(Custom Tab / ASWebAuthSession)" as nav
+  participant "Keystore / Keychain\n(StrongBox / Secure Enclave)" as ks
+end box
+participant "Play Integrity /\nApp Attest" as att
+box "Data Center BP" #fbf4f4
+  participant "IdP Corporativo\n(OAuth 2.0 / OIDC – FAPI 2.0)" as idp
+end box
+box "AWS – Banca por Internet BP" #f4fbf5
+  participant "API Gateway de Canales\n(JWT Authorizer + WAF)" as gw
+  participant "Microservicio\n(p. ej. Movimientos)" as ms
+end box
+
+== Inicio de sesión ==
+cli -> app : Abre la app y pulsa "Ingresar"
+app -> ks : Genera / recupera llave del dispositivo (DPoP)\n y crea code_verifier, code_challenge=S256, state, nonce
+app -> idp : POST /as/par (PAR): client_id, redirect_uri,\n scope=openid accounts:read transfers:write, code_challenge, acr_values=aal2
+idp --> app : request_uri (uso único, 60 s)
+app -> nav : Abre /authorize?client_id&request_uri
+nav -> idp : GET /authorize (TLS 1.3)
+alt Usuario + clave (primer factor) + MFA
+  idp -> nav : Formulario de login
+  cli -> nav : Usuario y clave
+  idp -> idp : Verifica hash Argon2id; evalúa riesgo\n(dispositivo, geolocalización, hora, velocidad)
+  idp -> nav : Solicita 2.º factor (OTP push / passkey)
+  cli -> nav : Aprueba OTP push
+else Passkey / biometría (FIDO2 – WebAuthn, sin contraseña)
+  idp -> nav : Reto WebAuthn (challenge, rpId)
+  nav -> ks : Firma el reto con la llave privada\n(desbloqueo por huella / rostro)
+  ks --> nav : Aserción firmada
+  nav -> idp : Aserción (la biometría nunca sale del dispositivo)
+end
+idp -> idp : Autenticación exitosa → emite authorization code\n(un solo uso, ligado a code_challenge)
+idp --> nav : 302 redirect_uri?code=...&state=...
+nav --> app : App Link / Universal Link (redirect_uri reclamada; RFC 8252)
+app -> app : Verifica state
+
+== Intercambio del código ==
+app -> att : Solicita token de atestación (integridad de app y dispositivo)
+att --> app : Token de atestación
+app -> idp : POST /token: grant_type=authorization_code, code,\n code_verifier, client_id + cabecera DPoP (JWK + firma) + atestación
+idp -> idp : Verifica PKCE (S256), prueba DPoP, atestación y nonce
+idp --> app : access_token (JWT 5 min, cnf.jkt), id_token,\n refresh_token (rotativo, 30 días)
+app -> ks : Guarda refresh_token cifrado por hardware;\n access_token solo en memoria
+
+== Consumo de APIs ==
+app -> gw : GET /accounts/{id}/movements\n Authorization: DPoP <access_token> · DPoP: <proof> · traceparent
+gw -> gw : JWT Authorizer: firma (JWKS cache), iss, aud, exp, scope;\n WAF + rate limiting por cliente
+gw -> ms : Enruta (VPC Link + mTLS)
+ms -> ms : Revalida JWT, scope, acr; verifica cnf.jkt vs prueba DPoP;\n autorización fina (cliente = sub)
+ms --> gw : 200 movimientos
+gw --> app : 200 (JSON)
+app --> cli : Muestra el histórico
+
+== Renovación y step-up ==
+loop cada vez que el access_token expira (5 min)
+  app -> idp : POST /token grant_type=refresh_token + DPoP
+  idp --> app : Nuevo access_token + nuevo refresh_token\n(rotación; reuso detectado ⇒ revoca toda la familia)
+end
+cli -> app : Solicita transferencia sobre el umbral
+app -> gw : POST /transfers (acr actual = aal2)
+gw -> ms : Enruta
+ms --> app : 403 insufficient_user_authentication (acr_values=aal3)
+app -> nav : Re-autoriza: /authorize (PAR) con acr_values=aal3, prompt=login
+nav -> idp : Step-up: biometría / passkey obligatoria (SCA)
+idp --> app : Nuevo access_token con acr=aal3 (vigencia 2 min)
+app -> gw : POST /transfers (reintento con acr=aal3 + Idempotency-Key)
+gw -> ms : Enruta
+ms --> app : 202 transferencia aceptada
+@enduml

@@ -1,0 +1,91 @@
+@startuml 14_observabilidad
+!include <C4/C4_Container>
+!include <awslib/AWSCommon>
+!include <awslib/ManagementGovernance/CloudWatch>
+!include <awslib/ManagementGovernance/ManagedGrafana>
+!include <awslib/ManagementGovernance/ManagedServiceforPrometheus>
+!include <awslib/ManagementGovernance/CloudTrail>
+!include <awslib/ManagementGovernance/SystemsManager>
+!include <awslib/ManagementGovernance/Config>
+!include <awslib/Analytics/OpenSearchService>
+!include <awslib/SecurityIdentityCompliance/GuardDuty>
+!include <awslib/SecurityIdentityCompliance/SecurityHub>
+!include <awslib/ApplicationIntegration/SimpleNotificationService>
+!include <awslib/ApplicationIntegration/EventBridge>
+!include <awslib/Containers/ElasticKubernetesService>
+!include <awslib/NetworkingContentDelivery/Route53>
+LAYOUT_TOP_DOWN()
+skinparam wrapWidth 150
+title Monitoreo, Observabilidad y Auto-healing: flujo de señales (métricas · logs · trazas · seguridad) hasta la respuesta automática y humana
+
+Container_Boundary(src, "Fuentes de telemetría") {
+  Container(rum, "RUM / Crash reporting", "CloudWatch RUM (SPA) · Firebase Crashlytics / Sentry (app)", "Experiencia real del usuario: Core Web Vitals, errores JS, crashes")
+  Container(edge, "Borde", "CloudFront + WAF + Shield logs", "Bloqueos WAF, latencia por país, ataques DDoS")
+  Container(apigw, "API Gateway", "Access logs + métricas", "4xx/5xx, latencia p50/p99, throttling por cliente")
+  Container(eks, "Microservicios en EKS", "OpenTelemetry SDK + Istio / Envoy", "Métricas RED por servicio, logs JSON estructurados, trazas distribuidas (traceparent)", $sprite="ElasticKubernetesService")
+  Container(data, "Datos y mensajería", "Aurora Performance Insights · ElastiCache · MSK · DynamoDB", "Réplica lag, conexiones, consumer lag, throttles")
+  Container(sec, "Señales de seguridad", "CloudTrail (org) · VPC Flow Logs · GuardDuty · Inspector · AWS Config", "Actividad de API, tráfico anómalo, hallazgos, desviaciones de configuración", $sprite="CloudTrail")
+  Container(syn, "Monitoreo sintético", "CloudWatch Synthetics (canaries) · Route 53 health checks", "Login, consulta y transferencia simuladas cada 1 min desde 3 ubicaciones")
+}
+
+Container_Boundary(col, "Recolección y almacenamiento") {
+  Container(otel, "OTel Collector", "DaemonSet en EKS – ADOT", "Recibe OTLP, enriquece (servicio, versión, AZ), muestrea trazas (tail-based) y enruta")
+  Container(amp, "Métricas", "Amazon Managed Service for Prometheus", "Retención 150 días; reglas de grabación y alertas (SLO burn rate)", $sprite="ManagedServiceforPrometheus")
+  Container(cwl, "Logs", "Amazon CloudWatch Logs + Logs Insights", "PII enmascarada en origen; retención 1 año (13 meses)", $sprite="CloudWatch")
+  Container(xray, "Trazas", "AWS X-Ray", "Mapa de servicios, latencia por span, correlación con logs por trace-id")
+  Container(os, "Logs de seguridad y auditoría", "Amazon OpenSearch Service", "Búsqueda y detección de anomalías; alimenta al SIEM", $sprite="OpenSearchService")
+  Container(sh, "Security Hub", "Agregación de hallazgos (CIS, PCI DSS, Foundational)", "Puntaje de postura de seguridad", $sprite="SecurityHub")
+}
+
+Container_Boundary(viz, "Visualización, SLOs y alertamiento") {
+  Container(graf, "Dashboards y SLOs", "Amazon Managed Grafana", "Golden signals por servicio; SLO 99.95 % disponibilidad, p99 < 800 ms; error budget", $sprite="ManagedGrafana")
+  Container(alarm, "Alarmas", "CloudWatch Alarms + Alertmanager (AMP)", "Alertas de síntoma (SLO burn rate 2 %/h y 5 %/6 h), no de causa", $sprite="CloudWatch")
+  Container(eb, "Bus de eventos operativos", "Amazon EventBridge", "Enruta alarmas, hallazgos y eventos de AWS Health", $sprite="EventBridge")
+  Container(sns, "Notificación", "Amazon SNS → PagerDuty / Opsgenie · Slack / Teams", "Escalamiento on-call 24×7 (SRE, seguridad)", $sprite="SimpleNotificationService")
+}
+
+Container_Boundary(resp, "Respuesta y auto-healing") {
+  Container(k8s, "Auto-healing de plataforma", "Kubernetes: liveness / readiness probes, HPA, KEDA, Karpenter, PodDisruptionBudgets", "Reinicia pods no saludables, escala por CPU / latencia / consumer lag, reemplaza nodos")
+  Container(mesh, "Resiliencia en malla", "Istio + Resilience4j", "Circuit breaker, outlier detection, retries idempotentes, timeouts, bulkheads")
+  Container(dbfail, "Failover gestionado", "Aurora (< 30 s) · ElastiCache · MSK · Route 53 / Global Accelerator", "Conmutación automática Multi-AZ y a la región DR")
+  Container(ssm, "Runbooks automatizados", "AWS Systems Manager Automation + Incident Manager", "Remediación automática (p. ej. rotar credencial, aislar nodo, purgar caché) y gestión de incidentes")
+  Container(fis, "Ingeniería de caos", "AWS Fault Injection Service + game days", "Valida hipótesis de resiliencia (caída de AZ, latencia al Core)")
+  Container(siem, "SOC / SIEM corporativo", "Splunk / Microsoft Sentinel", "Correlación de seguridad 24×7 y respuesta a incidentes")
+}
+
+Person(sre, "Equipo SRE / Operaciones", "On-call 24×7")
+Person(soc, "Equipo de Seguridad (SOC)", "Respuesta a incidentes")
+
+Rel(rum, cwl, "Eventos RUM")
+Rel(edge, cwl, "Logs")
+Rel(apigw, cwl, "Access logs")
+Rel(apigw, amp, "Métricas")
+Rel(eks, otel, "OTLP (métricas, logs, trazas)")
+Rel(otel, amp, "Remote write")
+Rel(otel, cwl, "Logs estructurados")
+Rel(otel, xray, "Trazas")
+Rel(data, amp, "Métricas (exporters)")
+Rel(sec, os, "Eventos de seguridad")
+Rel(sec, sh, "Hallazgos")
+Rel(syn, alarm, "Éxito / latencia de canaries")
+Rel(amp, graf, "PromQL")
+Rel(cwl, graf, "Logs Insights")
+Rel(xray, graf, "Trazas")
+Rel(amp, alarm, "Reglas de alerta")
+Rel(cwl, alarm, "Metric filters")
+Rel(alarm, eb, "Estado ALARM")
+Rel(sh, eb, "Hallazgos críticos")
+Rel(eb, sns, "Notifica")
+Rel(eb, ssm, "Dispara remediación automática")
+Rel(sns, sre, "Página / mensaje")
+Rel(os, siem, "Reenvío de eventos")
+Rel(sh, siem, "Hallazgos")
+Rel(siem, soc, "Alertas correlacionadas")
+Rel(alarm, k8s, "Señales para escalar (KEDA, HPA)")
+Rel(mesh, otel, "Telemetría de Envoy")
+Rel(dbfail, eb, "Eventos de failover")
+Rel(fis, graf, "Verifica SLOs durante experimentos")
+Rel(sre, graf, "Investiga con dashboards, logs y trazas")
+Rel(sre, ssm, "Ejecuta runbooks")
+SHOW_LEGEND()
+@enduml

@@ -1,0 +1,49 @@
+@startuml 08_componentes_clientes_frecuentes
+!include <C4/C4_Component>
+!include <awslib/AWSCommon>
+!include <awslib/Analytics/ManagedStreamingforApacheKafka>
+!include <awslib/Database/DynamoDB>
+!include <awslib/Database/ElastiCache>
+LAYOUT_TOP_DOWN()
+skinparam wrapWidth 160
+title Diagrama de Componentes (C4 – Nivel 3): Persistencia de información para clientes frecuentes (patrones de diseño)
+
+Container(bff, "BFF Web / BFF Móvil", "Spring Boot", "Emite un evento de uso por cada consulta autenticada")
+
+Container_Boundary(cli, "Servicio de Clientes / Servicio de Movimientos [Spring Boot – Amazon EKS]") {
+  Component(api, "API de Consulta", "REST", "GET /customers/me, GET /accounts/{id}/movements")
+  Component(repo, "Repositorio de Cliente (Facade)", "Patrones Repository + Strategy (selección de fuente)", "Decide la fuente: L1 Redis → L2 DynamoDB (solo frecuentes) → Core / CRM vía integración. Stale-while-revalidate si el Core falla (circuit breaker).")
+  Component(l1, "Decorador de Caché", "Patrones Cache-Aside + Decorator – TTL 60 s (saldos 30 s)", "Lee de Redis; en miss consulta y escribe. El saldo previo a una transferencia siempre se lee del Core.")
+  Component(usage, "Publicador de Eventos de Uso", "Patrón Observer – Outbox → Kafka", "Emite CustomerQueried, MovementsQueried, LoginSucceeded.")
+  Component(port, "Puerto de Integración", "Adapter (ACL) → API Gateway de Integración", "Fuente de verdad: Core + CRM.")
+}
+Container_Boundary(perf, "Servicio de Perfil Digital – clientes frecuentes [Spring Boot + Kafka Streams – Amazon EKS]") {
+  Component(analyzer, "Analizador de Frecuencia", "Kafka Streams – ventana deslizante de 30 días", "Cuenta accesos por cliente; clasifica FRECUENTE si supera N accesos / semana (parametrizable). Emite CustomerBecameFrequent / CustomerBecameInactive.")
+  Component(mat, "Materializador de Perfil", "Consumidor Kafka – patrones Materialized View / CQRS", "Consolida datos básicos + productos + últimos 50 movimientos en un documento y lo escribe en DynamoDB y Redis.")
+  Component(refresh, "Refresh-Ahead Scheduler", "Amazon EventBridge Scheduler + AWS Lambda", "Antes de expirar el TTL refresca el perfil solo de clientes frecuentes (evita misses en horas pico).")
+  Component(inval, "Invalidador por Eventos", "Consumidor de core-cdc y transfer-events", "Ante un movimiento nuevo actualiza / invalida el perfil (consistencia eventual acotada, < 2 s).")
+}
+ContainerDb(redis, "Caché L1", "Amazon ElastiCache for Redis (cluster mode, Multi-AZ)", "Hot data por cliente", $sprite="ElastiCache")
+ContainerDb(ddb, "Vista de Clientes Frecuentes (L2)", "Amazon DynamoDB (single-table, TTL, Global Tables)", "Perfil consolidado por cliente", $sprite="DynamoDB")
+ContainerQueue(kafka, "Bus de Eventos", "Amazon MSK", "usage-events, core-cdc, transfer-events", $sprite="ManagedStreamingforApacheKafka")
+System_Ext(core, "Core Bancario / CRM", "Fuente de verdad (vía capa de integración)")
+
+Rel(bff, api, "Consulta", "REST, mTLS")
+Rel(api, repo, "Obtiene datos", "")
+Rel(repo, l1, "1. Busca en caché", "")
+Rel(l1, redis, "GET / SET con TTL", "TLS")
+Rel(repo, ddb, "2. Lee la vista del cliente frecuente", "HTTPS (SDK)")
+Rel(repo, port, "3. Consulta la fuente de verdad (miss o dato crítico)", "")
+Rel(port, core, "APIs Core / CRM", "REST, mTLS")
+Rel(api, usage, "Notifica el acceso (Observer)", "")
+Rel(usage, kafka, "Publica usage-events", "Kafka / TLS")
+Rel(kafka, analyzer, "Consume usage-events", "Kafka")
+Rel(analyzer, mat, "CustomerBecameFrequent", "")
+Rel(mat, core, "Obtiene datos a materializar", "REST, mTLS")
+Rel(mat, ddb, "Escribe perfil consolidado (TTL 24 h)", "HTTPS (SDK)")
+Rel(mat, redis, "Precarga hot data", "TLS")
+Rel(refresh, mat, "Dispara el refresco programado", "Lambda → REST")
+Rel(kafka, inval, "core-cdc / transfer-events", "Kafka")
+Rel(inval, mat, "Actualiza / invalida", "")
+SHOW_LEGEND()
+@enduml

@@ -1,0 +1,73 @@
+@startuml 05_componentes_transferencias
+!include <C4/C4_Component>
+!include <awslib/AWSCommon>
+!include <awslib/Database/Aurora>
+!include <awslib/Database/DynamoDB>
+!include <awslib/Analytics/ManagedStreamingforApacheKafka>
+!include <awslib/SecurityIdentityCompliance/KeyManagementService>
+!include <awslib/ManagementGovernance/CloudWatch>
+LAYOUT_TOP_DOWN()
+skinparam wrapWidth 160
+title Diagrama de Componentes (C4 – Nivel 3): Servicio de Transferencias y Pagos + Capa de Integración
+
+Container(bff, "BFF Móvil / BFF Web", "Spring Boot", "Recibe la orden del canal con JWT (acr = step-up) y clave de idempotencia")
+System_Ext(idp, "IdP Corporativo", "OIDC – JWKS, acr/amr")
+
+Container_Boundary(trf, "Servicio de Transferencias y Pagos [Spring Boot 3 / Java 21 – pods en Amazon EKS con sidecar Istio (mTLS STRICT)]") {
+  Component(ctl, "TransferController", "Spring MVC / OpenAPI 3", "POST /transfers, GET /transfers/{id}. Valida esquema y el encabezado Idempotency-Key.")
+  Component(secf, "Filtro de Seguridad", "Spring Security – OAuth2 Resource Server", "Valida JWT (firma, iss, aud, exp), scope transfers:write, acr de step-up y vínculo DPoP con el dispositivo.")
+  Component(idem, "Servicio de Idempotencia", "Patrón Idempotent Receiver – DynamoDB (put condicional, TTL 24 h)", "Registra la clave con la respuesta; ante reintentos devuelve el mismo resultado sin reprocesar.")
+  Component(rules, "Validador de Negocio y Límites", "Dominio (arquitectura hexagonal)", "Reglas de cuentas, montos, límites diarios / mensuales, horarios; saldo consultado en línea (nunca desde caché).")
+  Component(fraudc, "Cliente Antifraude", "REST / Resilience4j (CircuitBreaker, TimeLimiter 800 ms)", "Obtiene score de riesgo. Fail-closed sobre el umbral; fail-open con límites reducidos si el motor no responde.")
+  Component(saga, "Orquestador de Saga", "Patrón Saga (orquestación) – máquina de estados persistida", "PENDIENTE → DEBITADA → ENVIADA → COMPLETADA; compensa (reverso) ante rechazo o timeout.")
+  Component(repo, "Repositorio de Órdenes", "Spring Data JPA (puerto de salida)", "Persiste órdenes y transiciones en Aurora; misma transacción que el outbox.")
+  Component(outbox, "Publicador Outbox", "Patrón Transactional Outbox + Debezium (MSK Connect)", "Publica TransferAccepted / Completed / Failed y eventos de auditoría de forma confiable.")
+  Component(corec, "Cliente Core (cuentas propias)", "REST/JSON sobre mTLS – Retry idempotente, Bulkhead", "Débito / crédito entre cuentas propias (sincrónico).")
+  Component(achc, "Cliente ACH (interbancarias)", "ISO 20022 (pacs.008 / pacs.002) – mTLS + firma XMLDSig", "Envía órdenes interbancarias; estado asíncrono.")
+  Component(cb, "Receptor de Confirmaciones", "Webhook firmado (HMAC) / consumidor SQS", "Recibe el estado de la red, verifica la firma y avanza la saga.")
+  Component(tel, "Telemetría y Auditoría", "OpenTelemetry SDK + AuditInterceptor (AOP)", "Propaga trace-id, métricas RED y emite eventos de auditoría por outbox.")
+}
+
+Container_Boundary(integ, "Capa de Integración [Kong Gateway + Conectores ACL – Amazon EKS]") {
+  Component(gw, "API Gateway de Integración", "Kong Gateway", "mTLS por consumidor, credenciales, rate limit, mediación REST ↔ SOAP y ruteo por tipo de transacción.")
+  Component(coreA, "Conector Core (ACL)", "Spring Boot – Adapter / Anti-Corruption Layer", "Traduce el modelo canónico ↔ contratos del Core; reintentos con clave de idempotencia del Core.")
+  Component(achA, "Conector ACH (ACL)", "Spring Boot – Adapter", "Construye, firma y valida mensajes ISO 20022; gestiona certificados y ventanas de compensación.")
+}
+
+ContainerDb(dbtx, "BD Transaccional", "Amazon Aurora PostgreSQL", "Órdenes, sagas, outbox", $sprite="Aurora")
+ContainerDb(ddb, "Idempotencia", "Amazon DynamoDB (TTL)", "Claves de idempotencia", $sprite="DynamoDB")
+ContainerQueue(kafka, "Bus de Eventos", "Amazon MSK", "transfer-events, audit-events", $sprite="ManagedStreamingforApacheKafka")
+Container(sec, "Llaves y Secretos", "AWS KMS + Secrets Manager", "Llaves de firma, certificados", $sprite="KeyManagementService")
+Container(obs, "Observabilidad", "CloudWatch + X-Ray + Prometheus", "Métricas, logs, trazas", $sprite="CloudWatch")
+System_Ext(core, "Core Bancario", "Cuentas y movimientos")
+System_Ext(ach, "Red ACH / SPI", "Interbancarias")
+System_Ext(fraude, "Motor Antifraude", "Scoring")
+
+Rel(bff, ctl, "POST /transfers", "HTTPS/JSON + JWT + Idempotency-Key, mTLS Istio")
+Rel(ctl, secf, "Autentica / autoriza", "")
+Rel(secf, idp, "Llaves públicas (JWKS, caché)", "HTTPS")
+Rel(ctl, idem, "Verifica clave", "")
+Rel(idem, ddb, "Get / Put condicional", "HTTPS (SDK, IAM)")
+Rel(ctl, rules, "Valida orden", "")
+Rel(rules, fraudc, "Solicita score", "")
+Rel(fraudc, fraude, "Evalúa transacción", "REST/JSON, mTLS")
+Rel(rules, saga, "Inicia saga", "")
+Rel(saga, repo, "Persiste estado", "")
+Rel(repo, dbtx, "Lee / escribe", "JDBC / TLS, IAM auth")
+Rel(saga, outbox, "Registra eventos (misma transacción)", "")
+Rel(outbox, kafka, "Publica", "Kafka / TLS + SASL-IAM")
+Rel(saga, corec, "Transferencia propia", "")
+Rel(saga, achc, "Transferencia interbancaria", "")
+Rel(corec, gw, "API Core", "REST/JSON, mTLS")
+Rel(achc, gw, "API ACH", "REST / ISO 20022, mTLS")
+Rel(gw, coreA, "Enruta", "mTLS")
+Rel(gw, achA, "Enruta", "mTLS")
+Rel(coreA, core, "Consulta / débito / crédito", "REST o SOAP, mTLS (Direct Connect)")
+Rel(achA, ach, "pacs.008 / pacs.002", "ISO 20022, mTLS + firma")
+Rel(ach, cb, "Confirmaciones ACCP / RJCT", "Webhook firmado")
+Rel(cb, saga, "Avanza / compensa", "")
+Rel(achA, sec, "Llave de firma", "HTTPS (IAM)")
+Rel(tel, obs, "Exporta telemetría", "OTLP")
+Rel(tel, outbox, "Eventos de auditoría", "")
+SHOW_LEGEND()
+@enduml

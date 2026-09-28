@@ -1,0 +1,67 @@
+@startuml 06b_componentes_onboarding
+!include <C4/C4_Component>
+!include <awslib/AWSCommon>
+!include <awslib/ApplicationIntegration/APIGateway>
+!include <awslib/Storage/SimpleStorageService>
+!include <awslib/MachineLearning/Rekognition>
+!include <awslib/MachineLearning/Textract>
+!include <awslib/Database/Aurora>
+LAYOUT_TOP_DOWN()
+skinparam wrapWidth 160
+title Diagrama de Componentes (C4 – Nivel 3): Onboarding digital con reconocimiento facial (integrado al flujo de autenticación)
+
+Person(nuevo, "Cliente nuevo", "Se registra desde la app móvil")
+
+Container_Boundary(appb, "App Móvil [Flutter]") {
+  Component(onbm, "Módulo de Onboarding", "SDK KYC (Face Liveness) + cámara", "Captura documento (anverso / reverso) y selfie con prueba de vida activa / pasiva; guía al usuario paso a paso.")
+  Component(enrollm, "Enrolamiento de Credenciales", "flutter_appauth + local_auth + FIDO2", "Al finalizar, crea la clave, registra la passkey / huella y vincula el dispositivo.")
+}
+
+Container(apigw, "API Gateway de Canales", "Amazon API Gateway + AWS WAF", "Rate limit por IP / dispositivo; token de sesión de Onboarding de corta vida.", $sprite="APIGateway")
+
+Container_Boundary(onbb, "Servicio de Onboarding [Spring Boot – Amazon EKS]") {
+  Component(orch, "Orquestador de Onboarding", "Máquina de estados persistida – patrón Saga / Process Manager", "Coordina pasos, decisiones de riesgo y reanudación; expira sesiones incompletas (24 h).")
+  Component(cons, "Registro de Consentimiento", "LOPDP – evidencia con hash y sello de tiempo", "Consentimiento informado para datos biométricos y términos del servicio.")
+  Component(ocr, "Extracción del Documento", "Adaptador Amazon Textract (AnalyzeID)", "OCR de la cédula: nombres, número, vigencia, MRZ; validación de formato.")
+  Component(face, "Verificación Facial", "Adaptador intercambiable (Strategy): Rekognition Face Liveness + CompareFaces / Facephi / Incode", "Prueba de vida anti-spoofing (PAD) y coincidencia selfie ↔ documento / Registro Civil (umbral ≥ 90 %).")
+  Component(civ, "Validador de Identidad", "Adaptador Registro Civil (WS)", "Verifica que la cédula exista, esté vigente y coincida con los datos extraídos.")
+  Component(aml, "Screening AML / PEP", "Adaptador listas de control (OFAC, ONU, PEP, UAFE)", "Bloquea o escala a revisión manual del oficial de cumplimiento.")
+  Component(cust, "Alta de Cliente", "Adapter → API Gateway de Integración", "Crea el cliente y sus productos iniciales en el Core y el CRM.")
+  Component(enroll, "Enrolamiento en el IdP", "Cliente SCIM 2.0 (mTLS)", "Crea el usuario, la clave inicial y habilita el registro FIDO2 / device binding.")
+  Component(evid, "Repositorio de Evidencias", "S3 Object Lock + KMS (cifrado por cliente)", "Documento, selfie, scores y decisión; retención regulatoria.")
+}
+
+System_Ext(textract, "Amazon Textract", "OCR de documentos de identidad", $sprite="Textract")
+System_Ext(rek, "Amazon Rekognition", "Face Liveness + CompareFaces", $sprite="Rekognition")
+System_Ext(registro, "Registro Civil", "Validación de identidad ciudadana")
+System_Ext(listas, "Listas AML / PEP", "OFAC, ONU, UAFE")
+System_Ext(kong, "API Gateway de Integración", "Kong → Core Bancario + CRM")
+System_Ext(idp, "IdP Corporativo", "OAuth 2.0 / OIDC – SCIM 2.0")
+ContainerDb(s3, "Evidencias de Onboarding", "Amazon S3 (Object Lock, KMS)", "Retención ≥ 10 años", $sprite="SimpleStorageService")
+ContainerDb(db, "Estado del Onboarding", "Amazon Aurora PostgreSQL", "Sesiones, pasos, decisiones", $sprite="Aurora")
+Container(kafka, "Bus de Eventos", "Amazon MSK", "onboarding-events, audit-events")
+
+Rel(nuevo, onbm, "Documento + selfie", "")
+Rel(onbm, apigw, "POST /onboarding/sessions, /document, /liveness", "HTTPS / TLS 1.3 + pinning")
+Rel(apigw, orch, "Enruta /onboarding/*", "HTTPS (VPC Link) + mTLS")
+Rel(orch, db, "Persiste el estado", "JDBC / TLS, IAM auth")
+Rel(orch, cons, "1. Registra consentimiento", "")
+Rel(orch, ocr, "2. Extrae datos", "")
+Rel(orch, civ, "3. Valida identidad", "")
+Rel(orch, face, "4. Verifica vida y rostro", "")
+Rel(orch, aml, "5. Screening", "")
+Rel(orch, cust, "6. Crea cliente", "")
+Rel(orch, enroll, "7. Enrola credenciales", "")
+Rel(orch, evid, "8. Guarda evidencias", "")
+Rel(ocr, textract, "AnalyzeID", "HTTPS (SDK, IAM, VPC endpoint)")
+Rel(face, rek, "CreateFaceLivenessSession / GetFaceLivenessSessionResults / CompareFaces", "HTTPS (SDK, IAM, VPC endpoint)")
+Rel(civ, registro, "Consulta cédula", "HTTPS / WS, mTLS")
+Rel(aml, listas, "Consulta listas", "HTTPS, mTLS")
+Rel(cust, kong, "Alta de cliente y productos", "REST, mTLS")
+Rel(enroll, idp, "Crea usuario y credenciales", "SCIM 2.0, mTLS")
+Rel(evid, s3, "PutObject con retención", "HTTPS (SDK)")
+Rel(orch, kafka, "OnboardingCompleted / Rejected + auditoría (outbox)", "Kafka / TLS")
+Rel(onbm, enrollm, "9. Continúa al enrolamiento", "")
+Rel(enrollm, idp, "Registra passkey / huella (WebAuthn) y vincula dispositivo", "HTTPS – Code + PKCE")
+SHOW_LEGEND()
+@enduml

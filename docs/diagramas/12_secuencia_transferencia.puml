@@ -1,0 +1,82 @@
+@startuml 12_secuencia_transferencia
+!include _seq_style.iuml
+scale 1.4
+title Secuencia: Transferencia interbancaria (Saga orquestada + Transactional Outbox + notificación por dos canales)
+autonumber "<b>[00]"
+
+actor "Cliente BP" as cli
+participant "App Móvil /\nWeb SPA" as app
+box "AWS – Banca por Internet BP" #f4fbf5
+  participant "API Gateway\n+ BFF" as gw
+  participant "Servicio de\nTransferencias" as trf
+  database "DynamoDB\n(idempotencia)" as ddb
+  database "Aurora\n(órdenes + outbox)" as db
+  participant "Kong + Conectores\n(Capa de Integración)" as kong
+  participant "MSK (Kafka)\ntransfer-events" as kafka
+  participant "Servicio de\nNotificaciones" as notif
+end box
+participant "Motor\nAntifraude" as fraud
+box "Data Center BP" #fbf4f4
+  participant "Core\nBancario" as core
+end box
+participant "Red ACH / SPI\n(BCE)" as ach
+participant "SNS / SES ·\nTwilio / WhatsApp" as ch
+
+== Solicitud ==
+cli -> app : Confirma transferencia (monto, beneficiario) con biometría (step-up acr=aal3)
+app -> gw : POST /transfers · Idempotency-Key · DPoP
+gw -> trf : JWT validado (scope transfers:write, acr=aal3) → enruta (mTLS)
+trf -> ddb : PutItem condicional (Idempotency-Key, TTL 24 h)
+alt Clave ya procesada
+  ddb --> trf : Respuesta almacenada
+  trf --> app : Misma respuesta (sin reprocesar)
+end
+trf -> trf : Valida beneficiario, límites diarios / mensuales y horario
+trf -> kong : GET saldo de la cuenta origen (siempre en línea, nunca caché)
+kong -> core : Consulta saldo (mTLS, Direct Connect)
+core --> trf : Saldo disponible
+trf -> fraud : Score de riesgo (dispositivo, monto, beneficiario nuevo) – timeout 800 ms
+fraud --> trf : score
+alt Riesgo alto
+  trf -> db : Orden RECHAZADA + evento de auditoría (outbox)
+  trf --> app : 422 rechazada por política de riesgo
+end
+
+== Ejecución de la saga ==
+trf -> db : BEGIN: orden PENDIENTE + outbox(TransferInitiated) COMMIT
+trf -> kong : Débito en cuenta origen (Idempotency-Key)
+kong -> core : Débito + retención (REST / SOAP sobre mTLS)
+core --> kong : OK (id de movimiento)
+kong --> trf : Débito confirmado
+trf -> db : Estado DEBITADA + outbox
+trf -> kong : Enviar orden interbancaria
+kong -> ach : ISO 20022 pacs.008 firmado (XMLDSig) sobre mTLS
+ach --> kong : Acuse técnico (recibido)
+trf -> db : Estado ENVIADA + outbox(TransferAccepted)
+trf --> app : 202 Accepted {id, estado: EN_PROCESO}
+app --> cli : "Transferencia en proceso"
+db -> kafka : Debezium (outbox) publica TransferAccepted + audit-events
+kafka -> notif : Consume TransferAccepted
+notif -> ch : Canal 1: push (SNS/FCM) ; si falla → Canal 2: SMS (Twilio) ; luego correo (SES)
+ch --> cli : Notificación "Transferencia en proceso por $ X"
+
+== Confirmación asíncrona de la red ==
+ach -> kong : Webhook pacs.002 (firmado HMAC) / cola SQS
+kong -> trf : Estado de la orden
+alt ACCP (aceptada y liquidada)
+  trf -> db : Estado COMPLETADA + outbox(TransferCompleted)
+  db -> kafka : TransferCompleted
+  kafka -> notif : Consume
+  notif -> ch : Notificación "Transferencia exitosa" (dos canales)
+else RJCT (rechazada) o timeout de la ventana
+  trf -> kong : Compensación: reverso del débito (Idempotency-Key)
+  kong -> core : Reverso / liberación de retención
+  core --> trf : OK
+  trf -> db : Estado REVERSADA + outbox(TransferFailed)
+  db -> kafka : TransferFailed
+  kafka -> notif : Consume
+  notif -> ch : Notificación "Transferencia rechazada; fondos devueltos"
+end
+ch --> cli : Notificación final
+note over trf, kafka : Cada transición de estado genera un evento de auditoría (outbox → audit-events) con trace-id, sub, dispositivo, IP y resultado
+@enduml
